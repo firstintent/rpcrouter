@@ -1,15 +1,12 @@
-# CI（ROADMAP P2.4）：三门槛 + 离线压测冒烟档。
+# CI（ROADMAP P2.4）：三门槛 + 离线压测冒烟档 + GHCR 镜像发布。
 #
 # 触发：push / PR 到 main，另支持手动 workflow_dispatch。
 # 工具链：固定到 MSRV 1.97.0（Cargo.toml 的 rust-version=1.97），满足“1.97/stable”。
 # 离线说明：本仓库所有测试与压测均不触外网——chainlist 用本地样例/缓存、上游行为用
 # 进程内 mock（见 AGENTS.md 约定），故整条流水线可离线稳定复现。
 #
-# 用单 job 顺序执行的理由：
-#   - 步骤共享同一 target/ 目录与 Swatinem/rust-cache 缓存，避免拆 job 重复编译、
-#     重复缓存下载，整体更省时、更稳；
-#   - 冒烟压测依赖前面刚构建的 release 二进制，天然有先后依赖，拆并发无收益；
-#   - 步骤都是几十秒内的小任务，无并行收益，顺序执行最简洁。
+# Rust 门槛在单 job 内顺序执行，以便共享 target/ 与 cargo 缓存；镜像发布 job 等待
+# Rust 和 Dashboard 两组门槛通过后才运行。PR 只构建镜像，不登录或推送。
 
 name: ci
 
@@ -81,3 +78,57 @@ jobs:
 
       - name: Offline load smoke (assert user_visible_errors == 0 && p99 below loose threshold)
         run: bash scripts/ci-smoke.sh
+
+  image:
+    name: build / publish container image
+    needs: [dashboard, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve lowercase image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=ref,event=branch
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=rpcrouter
+            org.opencontainers.image.description=Blockchain JSON-RPC routing gateway
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=rpcrouter-image
+          cache-to: type=gha,mode=max,scope=rpcrouter-image
+          provenance: mode=max
