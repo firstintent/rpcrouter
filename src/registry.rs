@@ -1276,6 +1276,12 @@ impl Registry {
 
     pub async fn set_auto_pinned(&self, chain_id: u64, enabled: bool) -> bool {
         if enabled {
+            let ov = self.runtime_chain_override(chain_id);
+            if ov.pinned == Some(false) || ov.disabled == Some(true) {
+                return false;
+            }
+        }
+        if enabled {
             self.auto_pinned.insert(chain_id, true);
         } else {
             self.auto_pinned.remove(&chain_id);
