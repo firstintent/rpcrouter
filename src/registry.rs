@@ -692,7 +692,7 @@ impl Registry {
             entry
                 .value()
                 .pinned
-                .store(self.config.chains.contains(entry.key()), Ordering::Relaxed);
+                .store(self.is_pinned_chain(*entry.key()), Ordering::Relaxed);
             entry.value().disabled.store(false, Ordering::Relaxed);
         }
         for (id, value) in &overrides.chains {
