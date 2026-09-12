@@ -188,6 +188,53 @@ W6b 验收（离线，axum `oneshot` + 进程内 mock 上游 + MemoryStore）：
      四门槛全绿；`npm run build` 产物在 `/` 与 `/dashboard/` 两个入口都能加载（手动 `vite preview`
      或 curl 断言 index.html 引用的 asset 路径为 `/dashboard/assets/...`）。
 
+## W9 — 自动开启优质链（分支 `w9-auto-enable`，DESIGN-v2 §15）
+
+> 2026-09-12 用户决策：默认按规则批量开启优质 EVM 链，不需要人工在控制台配置；
+> **只增不减，减法只有人工**；自动开启的判定与观察**不依赖 Prometheus**。
+> 档位已拍板：主网 + 端点数 ≥ 5 + 每链采样 8 端点起步（约 190 条链）。本工作流一轮 checker。
+
+范围：
+
+1. `src/config.rs`：新增 `DiscoveryConfig.auto_enable`（§15.5 全部字段 + 默认值）、三个环境
+   变量、校验（`min_endpoints ≥ 1`、`max_chains ≥ 1`、`probe_batch ≥ 1`、
+   `promote_after_rounds ≥ 1`、`probe_concurrency ≥ 1`）；`config.toml` 样例与 README 配置表同步。
+2. `src/state.rs`：`chains:auto` 读写（`load_auto_chains` / `put_auto_chain`），Memory/File/Redis
+   三后端 + `export`/`import`/`reset` 覆盖 + `meta.schema_version` bump（旧库无 key = 空集合）。
+3. `src/autoenable.rs`（新模块，交 supervisor 监督）：§15.3 候选构建 + 轮转分批探测 + 连续轮次
+   晋级；探测复用 `probe` 的 reqwest client 配置与 `signals::classify_response`，**不**为候选链
+   建 `ChainState`；状态存储不可写时暂停晋级并记 WARN。
+4. `src/registry.rs`：自动开启标记复用 pinned 分支（不 idle 降级、不参与 `max_hot_chains` LRU），
+   新增 `set_auto_pinned` / `auto_chain_ids` / `pin_source(chain_id)`；启动时按 `chains:auto`
+   预热（跳过带 `pinned=false` 或 `disabled=true` 墓碑的链）；规则引擎跳过墓碑链。
+5. `src/admin.rs`：`/admin/api/chains` 增 `pinSource`、`autoCandidate`；`/admin/api/overview` 增
+   `autoEnable` 块；公共 API 按 §15.7 改造（`state` 两档 `available|unverified`、默认只列
+   available、`q` 或 `scope=all` 返回全目录、overview 增 `chains.available`）。
+6. `src/metrics.rs`：只加**无 chain_id 标签**的标量（`rpcrouter_auto_enable_chains`、`_candidates`、
+   `_promotions_total`、`_probe_failures_total`）；`metrics_enabled = false` 时功能不受影响。
+7. `dashboard/`：链表 pinSource 列 + 候选视图（轮次/上次失败原因）；公共首页默认列已开启链、
+   搜索可查全目录；四门槛全绿。
+8. 文档：README 增「自动开启」章节（规则、档位、如何人工减法）；DESIGN-v2 §13 追加 W9 偏差记录。
+
+验收（全部离线，测试禁止访问外网）：
+
+- a) 用内置 fixture 目录 + 本地 mock 上游驱动一轮完整晋级：候选构建命中预期链集合；
+     连续 2 轮合格才晋级；chainId 不匹配的假节点端点不计入合格；合格端点不足 2 个不晋级；
+- b) **只增不减**：已开启链的全部 mock 端点变为不可用后，链仍在 `chains:auto` 且 `state=pinned`，
+     公共页显示 `unverified`；进程重启后集合完整恢复；状态存储只读时晋级被跳过且不进内存；
+- c) **人工减法**：`unpin` 后链回 dormant 且后续多轮扫描不再被自动加回；`disable` 后 403 且同样
+     不被加回；`pin` 可重新纳入；
+- d) 上限：`max_chains` 设小值时停止新增且不淘汰已开启链，overview 的 `pending`/`capped` 正确；
+- e) 公共 API：默认列表只含 available；`q` 搜索能命中 dormant 链；disabled 链仍不可见；
+     `/api/public/chains/{id}` 对 available 与 unverified 均 200，disabled 404；
+- f) 探测预算：单轮探测端点数 ≤ `probe_batch × max_endpoints_per_chain`，并发不超过
+     `probe_concurrency`（用计数断言）；候选扫描不阻塞启动；
+- g) `metrics_enabled = false` 时自动开启功能与 Admin API 展示完全正常；
+- h) 10k QPS 压测复跑（本地 mock 上游，pinned 链）：p99 与 UVE 不劣于 W5 报告
+     （p99 1.5ms / UVE 0），报告写 `docs/reports/loadtest-w9.md`；
+- i) 门槛：`cargo fmt --check` && `cargo clippy -- -D warnings` && `cargo test` 全绿；
+     前端 `npm run lint && npm run typecheck && npm test && npm run build` 全绿。
+
 ## 交付说明模板（maker 每轮结束时用）
 
 ```
