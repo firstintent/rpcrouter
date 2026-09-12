@@ -28,13 +28,31 @@ rpcrouter 是一个 Rust 实现的区块链节点 RPC 路由网关：聚合 [cha
 
 全程自主推进，不向用户中途提问。
 
+## 需求管理流程（2026-09-12 起固定为这个形式）
+
+**每条新需求先建提案目录，再谈方案。** 顺序不可颠倒：需求正文没定稿就不写 DESIGN、不派开发。
+
+1. 建 `docs/proposals/YYYY-MM-DD-<slug>/`（日期 = 需求提出日，slug 用英文短横线）。
+2. 写需求正文：用户原话逐字保留、澄清过程、定稿后的需求陈述、明确不在范围内的事、
+   逐条决策与理由、数据依据（附可复算脚本）。文件拆分与写作约定见 `docs/proposals/README.md`。
+3. 需求定稿后再写架构方案（`docs/DESIGN*.md`）与任务拆解（`docs/TASKS*.md`），然后才派开发。
+4. 在 `docs/proposals/README.md` 的索引表登记一行，交付后更新状态。
+5. 提案原文定稿后不改；后续变更追加「变更记录」小节或新开提案并互链。
+
+三类文档分工不重复：**提案回答「要什么」，设计回答「怎么建」，任务回答「谁做什么、怎么算完」。**
+
 ## 关键文档
 
+- `docs/README.md` — 文档地图（先看这个）
+- `docs/proposals/` — 需求提案，按日期分目录；索引在 `docs/proposals/README.md`
+- `docs/DESIGN.md` — v1 架构方案（现行基线，主会话维护）
+- `docs/DESIGN-v2.md` — v2 增补：动态目录 / 状态存储 / Admin API / 公共主页 / 自动开启
+- `docs/TASKS-v2.md` — v2 阶段任务拆解与验收标准（W5 起）
+- `docs/ROADMAP.md` — v1 后规划 P1–P5 与各项状态
+- `docs/OPERATIONS.md` — 部署与排障手册
+- `docs/reports/` — 压测与验收报告
 - `docs/research/` — Grok 调研产出（只读参考）
-- `docs/DESIGN.md` — 架构方案（主会话维护）
-- `docs/TASKS.md` — v1 阶段任务拆解与验收标准（已完成，存档）
-- `docs/ROADMAP.md` — v1 后规划：部署 / 生产可用 / 动态全链+Dashboard / 命名链路由（P1–P5）
-- `docs/DESIGN-v2.md` / `docs/TASKS-v2.md` — P3 动态全链目录 + 状态控制 Dashboard 的方案与任务拆解
+- `docs/archive/` — 已完成不再维护的文档（`TASKS-v1.md` 为 v1 阶段任务拆解）
 
 ## 技术与工程约定
 
@@ -52,7 +70,7 @@ rpcrouter 是一个 Rust 实现的区块链节点 RPC 路由网关：聚合 [cha
 
 - [x] 仓库治理初始化（本文件、git）
 - [x] Grok 调研：开源复用评估 / chainlist 数据方案（docs/research/）
-- [x] DESIGN.md / TASKS.md
+- [x] DESIGN.md / TASKS.md（v1 任务拆解已移入 `docs/archive/TASKS-v1.md`）
 - [x] Codex 分阶段实现 Phase 1–4（含冷启动 Probation 兜底修复）
 - [x] 验收：8 链真实 E2E；10k QPS 压测双跑验证（docs/reports/loadtest-phase3.md）；
       429 摘除/回池时间线复现；`user_visible_errors == 0`
@@ -75,3 +93,7 @@ v1 已交付（2026-07-26 验收）。后续任务规划统一沉淀在 `docs/RO
   - [x] W7 React dashboard（2026-08-25 合入：总览/链列表/链详情/设置，四门槛 + CI job + 镜像内置）。
   - [x] W8 公共只读主页（2026-08-26 合入：`/` 与 `/chain/{id}` 无需登录的只读公共页 + `/api/public/*`
         无鉴权裁剪接口（5s 服务端 memo），dashboard 退为运维后台；`admin.public_site` 开关；DESIGN-v2 §14）。
+- [ ] W9 自动开启优质链（2026-09-12 立项，开发中）：按规则批量常驻开启优质 EVM 主网链
+      （主网 + 去重 https 端点 ≥5 + 每链采样 8 端点，约 190 条），**只增不减、减法只有人工**，
+      判定与观察不依赖 Prometheus；需求 `docs/proposals/2026-09-12-auto-enable-chains/`、
+      方案 DESIGN-v2 §15、任务 TASKS-v2 W9。
