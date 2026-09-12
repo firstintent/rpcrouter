@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod autoenable;
 pub mod cache;
 pub mod chainlist;
 pub mod classify;

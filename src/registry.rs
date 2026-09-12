@@ -603,6 +603,7 @@ pub struct Registry {
     chains: DashMap<u64, Arc<ChainState>>,
     activation_locks: DashMap<u64, Arc<tokio::sync::Mutex<()>>>,
     runtime_pinned: DashMap<u64, bool>,
+    auto_pinned: DashMap<u64, bool>,
     runtime_chain_overrides: DashMap<u64, ChainOverrideState>,
     runtime_endpoint_overrides: DashMap<String, EndpointOverrideState>,
     restored_health: DashMap<String, HealthSnapshot>,
@@ -636,6 +637,7 @@ impl Registry {
             chains: DashMap::new(),
             activation_locks: DashMap::new(),
             runtime_pinned: DashMap::new(),
+            auto_pinned: DashMap::new(),
             runtime_chain_overrides: DashMap::new(),
             runtime_endpoint_overrides: DashMap::new(),
             restored_health: DashMap::new(),
@@ -690,7 +692,7 @@ impl Registry {
             entry
                 .value()
                 .pinned
-                .store(self.config.chains.contains(entry.key()), Ordering::Relaxed);
+                .store(self.is_pinned_chain(*entry.key()), Ordering::Relaxed);
             entry.value().disabled.store(false, Ordering::Relaxed);
         }
         for (id, value) in &overrides.chains {
@@ -728,6 +730,17 @@ impl Registry {
                 value.clone(),
             )
             .await;
+        }
+    }
+
+    /// 从状态存储恢复自动开启集合。仅用于启动阶段，不触及请求热路径。
+    pub fn restore_auto_pinned<I>(&self, chain_ids: I)
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        self.auto_pinned.clear();
+        for id in chain_ids {
+            self.auto_pinned.insert(id, true);
         }
     }
 
@@ -801,6 +814,16 @@ impl Registry {
 
     // ── 热路径：resolve_for_request ──
 
+    fn is_pinned_chain(&self, chain_id: u64) -> bool {
+        if self.config.chains.contains(&chain_id) {
+            return true;
+        }
+        if let Some(v) = self.runtime_pinned.get(&chain_id) {
+            return *v;
+        }
+        self.auto_pinned.get(&chain_id).is_some_and(|v| *v)
+    }
+
     /// 热路径：解析 chain_id 并触达 ChainState。
     /// DashMap get + 原子读；dormant 时才走慢路径 materialize。
     /// 返回 `None` 表示未知链（不在目录也不在 pinned）。
@@ -828,11 +851,7 @@ impl Registry {
         }
 
         // 未知链不得污染 activation_locks：先完成目录/配置判定，再建立锁。
-        let pinned = self.config.chains.contains(&chain_id)
-            || self
-                .runtime_pinned
-                .get(&chain_id)
-                .is_some_and(|value| *value);
+        let pinned = self.is_pinned_chain(chain_id);
         let denied = self.config.discovery.deny.contains(&chain_id);
         let catalog = self.catalog.read().await;
         let catalog_entry = catalog.as_ref().and_then(|c| c.lookup(chain_id));
@@ -1040,6 +1059,11 @@ impl Registry {
                 .iter()
                 .filter_map(|entry| (*entry.value()).then_some(*entry.key())),
         );
+        materialized_ids.extend(
+            self.auto_pinned
+                .iter()
+                .filter_map(|entry| (*entry.value()).then_some(*entry.key())),
+        );
         materialized_ids.extend(self.chains.iter().filter_map(|entry| {
             matches!(
                 entry.value().state_label(),
@@ -1053,11 +1077,7 @@ impl Registry {
             let name = source
                 .map(|chain| chain.name.clone())
                 .unwrap_or_else(|| format!("Chain {chain_id}"));
-            let pinned = self.config.chains.contains(&chain_id)
-                || self
-                    .runtime_pinned
-                    .get(&chain_id)
-                    .is_some_and(|value| *value);
+            let pinned = self.is_pinned_chain(chain_id);
             let state = self
                 .chains
                 .entry(chain_id)
@@ -1252,6 +1272,100 @@ impl Registry {
             state.last_ingress.store(unix_seconds(), Ordering::Relaxed);
         }
         true
+    }
+
+    pub async fn set_auto_pinned(&self, chain_id: u64, enabled: bool) -> bool {
+        if enabled {
+            let ov = self.runtime_chain_override(chain_id);
+            if ov.pinned == Some(false) || ov.disabled == Some(true) {
+                return false;
+            }
+        }
+        if enabled {
+            self.auto_pinned.insert(chain_id, true);
+        } else {
+            self.auto_pinned.remove(&chain_id);
+        }
+        if let Some(state) = self.chain(chain_id) {
+            state
+                .pinned
+                .store(self.is_pinned_chain(chain_id), Ordering::Relaxed);
+        }
+        enabled
+    }
+
+    /// 人工墓碑：被显式 unpin 或 disable 的链，自动开启规则永远跳过。
+    pub fn tombstoned_chain_ids(&self) -> std::collections::HashSet<u64> {
+        self.runtime_chain_overrides
+            .iter()
+            .filter(|entry| {
+                entry.value().pinned == Some(false) || entry.value().disabled == Some(true)
+            })
+            .map(|entry| *entry.key())
+            .collect()
+    }
+
+    /// 用状态存储里的自动开启集合替换内存集合（导入/重置/重连后调用）。
+    pub fn sync_auto_pinned<I>(&self, chain_ids: I)
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let next = chain_ids
+            .into_iter()
+            .filter(|id| !self.is_tombstoned(*id))
+            .collect::<std::collections::HashSet<_>>();
+        let stale = self
+            .auto_pinned
+            .iter()
+            .map(|entry| *entry.key())
+            .filter(|id| !next.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            self.auto_pinned.remove(&id);
+            if let Some(state) = self.chain(id) {
+                state
+                    .pinned
+                    .store(self.is_pinned_chain(id), Ordering::Relaxed);
+            }
+        }
+        for id in next {
+            self.auto_pinned.insert(id, true);
+            if let Some(state) = self.chain(id) {
+                state
+                    .pinned
+                    .store(self.is_pinned_chain(id), Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn auto_chain_ids(&self) -> Vec<u64> {
+        self.auto_pinned
+            .iter()
+            .filter_map(|e| (*e.value() && !self.is_tombstoned(*e.key())).then_some(*e.key()))
+            .collect()
+    }
+
+    /// 人工墓碑判定：被显式 unpin 或 disable 的链。
+    fn is_tombstoned(&self, chain_id: u64) -> bool {
+        self.runtime_chain_overrides
+            .get(&chain_id)
+            .is_some_and(|value| value.pinned == Some(false) || value.disabled == Some(true))
+    }
+
+    pub fn pin_source(&self, chain_id: u64) -> Option<&'static str> {
+        if self.config.chains.contains(&chain_id) {
+            Some("config")
+        } else if self
+            .runtime_pinned
+            .get(&chain_id)
+            .is_some_and(|value| *value)
+        {
+            Some("manual")
+        } else if self.auto_pinned.contains_key(&chain_id) && !self.is_tombstoned(chain_id) {
+            Some("auto")
+        } else {
+            None
+        }
     }
 
     /// 已 materialized 的热链 id 列表（pinned + hot）。

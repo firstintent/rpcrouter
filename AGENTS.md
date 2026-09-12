@@ -93,7 +93,8 @@ v1 已交付（2026-07-26 验收）。后续任务规划统一沉淀在 `docs/RO
   - [x] W7 React dashboard（2026-08-25 合入：总览/链列表/链详情/设置，四门槛 + CI job + 镜像内置）。
   - [x] W8 公共只读主页（2026-08-26 合入：`/` 与 `/chain/{id}` 无需登录的只读公共页 + `/api/public/*`
         无鉴权裁剪接口（5s 服务端 memo），dashboard 退为运维后台；`admin.public_site` 开关；DESIGN-v2 §14）。
-- [ ] W9 自动开启优质链（2026-09-12 立项，开发中）：按规则批量常驻开启优质 EVM 主网链
+- [x] W9 自动开启优质链（2026-09-12 立项并交付）：按规则批量常驻开启优质 EVM 主网链
       （主网 + 去重 https 端点 ≥5 + 每链采样 8 端点，约 190 条），**只增不减、减法只有人工**，
       判定与观察不依赖 Prometheus；需求 `docs/proposals/2026-09-12-auto-enable-chains/`、
-      方案 DESIGN-v2 §15、任务 TASKS-v2 W9。
+      方案 DESIGN-v2 §15、任务 TASKS-v2 W9；压测见 docs/reports/loadtest-w9.md
+      （9,999.78 QPS、p99 1.036ms、UVE 0）。

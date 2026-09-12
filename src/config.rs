@@ -144,6 +144,17 @@ impl Config {
                 .parse()
                 .context("RPCROUTER_DISCOVERY_IDLE_SECONDS is not a valid integer")?;
         }
+        if let Some(raw) = env_non_empty("RPCROUTER_AUTO_ENABLE_ENABLED") {
+            self.discovery.auto_enable.enabled = parse_bool(&raw, "RPCROUTER_AUTO_ENABLE_ENABLED")?;
+        }
+        if let Some(raw) = env_non_empty("RPCROUTER_AUTO_ENABLE_MIN_ENDPOINTS") {
+            self.discovery.auto_enable.min_endpoints =
+                raw.parse().context("invalid auto min endpoints")?;
+        }
+        if let Some(raw) = env_non_empty("RPCROUTER_AUTO_ENABLE_MAX_CHAINS") {
+            self.discovery.auto_enable.max_chains =
+                raw.parse().context("invalid auto max chains")?;
+        }
         if let Some(raw) = env_non_empty("RPCROUTER_STATE_BACKEND") {
             self.state.backend = raw;
         }
@@ -231,6 +242,15 @@ impl Config {
         }
         if self.discovery.max_hot_chains == 0 {
             bail!("discovery.max_hot_chains must be greater than zero");
+        }
+        let a = &self.discovery.auto_enable;
+        if a.min_endpoints == 0
+            || a.max_chains == 0
+            || a.probe_batch == 0
+            || a.promote_after_rounds == 0
+            || a.probe_concurrency == 0
+        {
+            bail!("discovery.auto_enable numeric limits must be greater than zero");
         }
         if self.state.backend != "redis"
             && self.state.backend != "file"
@@ -431,6 +451,40 @@ pub struct DiscoveryConfig {
     pub max_hot_chains: usize,
     /// 非 pinned 链无流量后降级秒数。默认 600（10 分钟）。
     pub idle_seconds: u64,
+    pub auto_enable: AutoEnableConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct AutoEnableConfig {
+    pub enabled: bool,
+    pub min_endpoints: usize,
+    pub max_chains: usize,
+    pub max_candidates: usize,
+    pub max_endpoints_per_chain: usize,
+    pub candidate_interval_seconds: u64,
+    pub probe_batch: usize,
+    pub probe_concurrency: usize,
+    pub promote_after_rounds: usize,
+    pub min_active_endpoints: usize,
+    pub head_tolerance_blocks: u64,
+}
+impl Default for AutoEnableConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_endpoints: 5,
+            max_chains: 400,
+            max_candidates: 512,
+            max_endpoints_per_chain: 8,
+            candidate_interval_seconds: 30,
+            probe_batch: 32,
+            probe_concurrency: 8,
+            promote_after_rounds: 2,
+            min_active_endpoints: 2,
+            head_tolerance_blocks: 64,
+        }
+    }
 }
 
 impl Default for DiscoveryConfig {
@@ -441,6 +495,7 @@ impl Default for DiscoveryConfig {
             deny: Vec::new(),
             max_hot_chains: 256,
             idle_seconds: 600,
+            auto_enable: AutoEnableConfig::default(),
         }
     }
 }

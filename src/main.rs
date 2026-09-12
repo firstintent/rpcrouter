@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use axum::ServiceExt;
 use rpcrouter::{
     admin::AdminState,
+    autoenable::AutoEnableManager,
     chainlist::{ChainlistLoader, catalog_document},
     config::Config,
     forward::Forwarder,
@@ -146,6 +147,22 @@ async fn main() -> Result<()> {
     );
     let probes = Arc::new(ProbeManager::new(Arc::clone(&registry), &config)?);
     spawn_probes(Arc::clone(&probes), Arc::clone(&metrics));
+    // 自动开启：恢复持久化集合并预热，然后起后台评估任务（关闭时两者都不做）。
+    let auto_enable = if config.discovery.auto_enable.enabled {
+        let manager = Arc::new(
+            AutoEnableManager::new(Arc::clone(&registry), Arc::clone(&store), &config)?
+                .with_metrics(Arc::clone(&metrics)),
+        );
+        manager.preheat(&boot.auto_chains).await;
+        let task = Arc::clone(&manager);
+        supervisor::spawn("auto-enable", Arc::clone(&metrics), move || {
+            let task = Arc::clone(&task);
+            async move { task.run().await }
+        });
+        Some(manager)
+    } else {
+        None
+    };
     let initial_up = store.health().await;
     metrics.set_state_store_up(initial_up);
     state_runtime.write().await.up = initial_up;
@@ -191,6 +208,7 @@ async fn main() -> Result<()> {
         started: std::time::Instant::now(),
         state_runtime,
         public_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        auto_enable: auto_enable.clone(),
     };
     let app = guarded_service_from_state(
         AppState::new(registry, forwarder, config.server.batch_limit)
@@ -390,6 +408,10 @@ fn spawn_state_reconnect(
                         if let Ok(overrides) = store.load_overrides().await {
                             registry.apply_overrides(&overrides).await;
                             forwarder.apply_state_overrides(&overrides);
+                        }
+                        // 覆写与自动开启集合都以重连后的 Redis 为准。
+                        if let Ok(auto) = store.load_auto_chains().await {
+                            registry.sync_auto_pinned(auto.keys().copied());
                         }
                         info!("state store reconnected and Redis overrides applied");
                         delay = Duration::from_secs(1);

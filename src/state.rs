@@ -27,7 +27,16 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AutoChainState {
+    pub enabled_at: u64,
+    pub endpoints: u32,
+    pub active_seen: u32,
+    pub head: u64,
+}
 
 #[derive(Clone, Debug)]
 pub struct StateRuntimeSnapshot {
@@ -114,6 +123,7 @@ pub struct BootstrapState {
     pub overrides: Overrides,
     pub health: Vec<HealthSnapshot>,
     pub hot_chains: Vec<(u64, u64)>,
+    pub auto_chains: BTreeMap<u64, AutoChainState>,
     pub catalog_etag: Option<String>,
     pub catalog_fetched_at: u64,
 }
@@ -127,6 +137,7 @@ pub struct StateExport {
     pub overrides: Overrides,
     pub health: Vec<HealthSnapshot>,
     pub hot_chains: Vec<(u64, u64)>,
+    pub auto_chains: BTreeMap<u64, AutoChainState>,
     pub catalog_etag: Option<String>,
     pub catalog_fetched_at: u64,
 }
@@ -152,6 +163,12 @@ pub trait StateStore: Send + Sync {
     async fn flush_health(&self, batch: &[HealthSnapshot]) -> Result<()>;
     async fn load_health(&self) -> Result<Vec<HealthSnapshot>>;
     async fn set_hot_chains(&self, chains: &[(u64, u64)]) -> Result<()>;
+    async fn load_auto_chains(&self) -> Result<BTreeMap<u64, AutoChainState>> {
+        Ok(BTreeMap::new())
+    }
+    async fn put_auto_chain(&self, _chain_id: u64, _value: &AutoChainState) -> Result<()> {
+        Ok(())
+    }
     async fn append_audit(&self, what: &str, target: &str) -> Result<()>;
     async fn export(&self) -> Result<StateExport>;
     async fn import(&self, value: &StateExport) -> Result<()>;
@@ -179,6 +196,8 @@ struct FileDocument {
     overrides: Overrides,
     health: Vec<HealthSnapshot>,
     hot_chains: Vec<(u64, u64)>,
+    #[serde(default)]
+    auto_chains: BTreeMap<u64, AutoChainState>,
     audit: Vec<AuditEntry>,
     seeded_at: u64,
     last_flush_at: u64,
@@ -270,6 +289,7 @@ impl StateStore for MemoryStore {
             overrides: d.overrides.clone(),
             health: d.health.clone(),
             hot_chains: d.hot_chains.clone(),
+            auto_chains: d.auto_chains.clone(),
             catalog_etag: d.catalog_etag.clone(),
             catalog_fetched_at: d.catalog_fetched_at,
         })
@@ -352,6 +372,15 @@ impl StateStore for MemoryStore {
         self.inner.lock().await.hot_chains = chains.to_vec();
         Ok(())
     }
+    async fn load_auto_chains(&self) -> Result<BTreeMap<u64, AutoChainState>> {
+        self.bump();
+        Ok(self.inner.lock().await.auto_chains.clone())
+    }
+    async fn put_auto_chain(&self, id: u64, v: &AutoChainState) -> Result<()> {
+        self.bump();
+        self.inner.lock().await.auto_chains.insert(id, v.clone());
+        Ok(())
+    }
     async fn append_audit(&self, what: &str, target: &str) -> Result<()> {
         self.bump();
         let mut d = self.inner.lock().await;
@@ -375,6 +404,7 @@ impl StateStore for MemoryStore {
             overrides: d.overrides.clone(),
             health: d.health.clone(),
             hot_chains: d.hot_chains.clone(),
+            auto_chains: d.auto_chains.clone(),
             catalog_etag: d.catalog_etag.clone(),
             catalog_fetched_at: d.catalog_fetched_at,
         })
@@ -392,6 +422,7 @@ impl StateStore for MemoryStore {
         d.overrides = v.overrides.clone();
         d.health = v.health.clone();
         d.hot_chains = v.hot_chains.clone();
+        d.auto_chains = v.auto_chains.clone();
         d.catalog_etag = v.catalog_etag.clone();
         d.catalog_fetched_at = v.catalog_fetched_at;
         Ok(())
@@ -495,6 +526,7 @@ impl StateStore for FileStore {
             overrides: d.overrides.clone(),
             health: d.health.clone(),
             hot_chains: d.hot_chains.clone(),
+            auto_chains: d.auto_chains.clone(),
             catalog_etag: d.catalog_etag.clone(),
             catalog_fetched_at: d.catalog_fetched_at,
         })
@@ -579,6 +611,15 @@ impl StateStore for FileStore {
         self.inner.lock().await.hot_chains = c.to_vec();
         self.save().await
     }
+    async fn load_auto_chains(&self) -> Result<BTreeMap<u64, AutoChainState>> {
+        self.bump();
+        Ok(self.inner.lock().await.auto_chains.clone())
+    }
+    async fn put_auto_chain(&self, id: u64, v: &AutoChainState) -> Result<()> {
+        self.bump();
+        self.inner.lock().await.auto_chains.insert(id, v.clone());
+        self.save().await
+    }
     async fn append_audit(&self, w: &str, t: &str) -> Result<()> {
         self.bump();
         self.inner.lock().await.audit.push(AuditEntry {
@@ -597,6 +638,7 @@ impl StateStore for FileStore {
             overrides: d.overrides.clone(),
             health: d.health.clone(),
             hot_chains: d.hot_chains.clone(),
+            auto_chains: d.auto_chains.clone(),
             catalog_etag: d.catalog_etag.clone(),
             catalog_fetched_at: d.catalog_fetched_at,
         })
@@ -614,6 +656,7 @@ impl StateStore for FileStore {
         d.overrides = v.overrides.clone();
         d.health = v.health.clone();
         d.hot_chains = v.hot_chains.clone();
+        d.auto_chains = v.auto_chains.clone();
         d.catalog_etag = v.catalog_etag.clone();
         d.catalog_fetched_at = v.catalog_fetched_at;
         drop(d);
@@ -807,6 +850,7 @@ impl StateStore for RedisStore {
             overrides: self.load_overrides().await?,
             health: self.load_health().await?,
             hot_chains: hot_raw,
+            auto_chains: self.load_auto_chains().await?,
             catalog_etag,
             catalog_fetched_at: catalog_fetched_at.unwrap_or(0),
         })
@@ -838,6 +882,30 @@ impl StateStore for RedisStore {
             .arg(self.key("meta"))
             .arg("schema_version")
             .arg(SCHEMA_VERSION)
+            .query_async(&mut *c)
+            .await?;
+        Ok(())
+    }
+    async fn load_auto_chains(&self) -> Result<BTreeMap<u64, AutoChainState>> {
+        self.bump();
+        let mut out = BTreeMap::new();
+        let mut c = self.manager.lock().await;
+        let vals: Vec<(u64, String)> = redis::cmd("HGETALL")
+            .arg(self.key("chains:auto"))
+            .query_async(&mut *c)
+            .await?;
+        for (id, s) in vals {
+            out.insert(id, serde_json::from_str(&s)?);
+        }
+        Ok(out)
+    }
+    async fn put_auto_chain(&self, id: u64, v: &AutoChainState) -> Result<()> {
+        self.bump();
+        let mut c = self.manager.lock().await;
+        let _: () = redis::cmd("HSET")
+            .arg(self.key("chains:auto"))
+            .arg(id)
+            .arg(serde_json::to_string(v)?)
             .query_async(&mut *c)
             .await?;
         Ok(())
@@ -997,6 +1065,7 @@ impl StateStore for RedisStore {
             overrides: d.overrides,
             health: d.health,
             hot_chains: d.hot_chains,
+            auto_chains: d.auto_chains,
             catalog_etag: d.catalog_etag,
             catalog_fetched_at: d.catalog_fetched_at,
         })
@@ -1069,6 +1138,13 @@ impl StateStore for RedisStore {
                 .arg(self.key(&format!("hot:{}", self.instance_id)))
                 .arg(*score)
                 .arg(*id);
+        }
+        // 自动开启集合必须随导入恢复：import 前面已 DEL 整个命名空间，漏写等于机器做减法。
+        for (id, value) in &v.auto_chains {
+            p.cmd("HSET")
+                .arg(self.key("chains:auto"))
+                .arg(id.to_string())
+                .arg(serde_json::to_string(value)?);
         }
         let mut c = self.manager.lock().await;
         let _: () = timeout(Duration::from_secs(5), p.query_async(&mut *c))
@@ -1183,6 +1259,29 @@ impl ResilientStore {
 
 #[async_trait]
 impl StateStore for ResilientStore {
+    async fn load_auto_chains(&self) -> Result<BTreeMap<u64, AutoChainState>> {
+        if let Some(p) = self.primary().await {
+            if let Ok(v) = p.load_auto_chains().await {
+                return Ok(v);
+            }
+            self.failed().await;
+        }
+        self.fallback.load_auto_chains().await
+    }
+    async fn put_auto_chain(&self, id: u64, v: &AutoChainState) -> Result<()> {
+        // 与其他权威写一致：primary 先写成功才写 fallback，失败直接报错让晋级顺延，
+        // 否则多实例部署下 Redis 丢记录会在重启后变成「机器做减法」。
+        let p = self
+            .primary()
+            .await
+            .context("Redis state store is unavailable")?;
+        if let Err(error) = p.put_auto_chain(id, v).await {
+            self.failed().await;
+            return Err(error);
+        }
+        self.fallback.put_auto_chain(id, v).await?;
+        Ok(())
+    }
     async fn bootstrap(&self) -> Result<BootstrapState> {
         if let Some(p) = self.primary().await {
             match p.bootstrap().await {

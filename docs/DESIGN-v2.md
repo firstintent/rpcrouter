@@ -591,3 +591,22 @@ head_tolerance_blocks = 64
   20s 间隔下约 65 probe/s，加候选探测约 10 probe/s。对单端点仍是分钟级，符合 TOS 约定。
 - 只增不减意味着长期只会变大：靠 `max_chains` 封顶 + 人工减法兜底。
 - 状态存储不可写时晋级暂停，属于预期降级（保证重启不回退）。
+
+### W9 偏差记录（2026-09-12）
+
+实现按 §15 规则落地。Dashboard 链表新增 `pinSource` 与候选视图，候选行展示连续合格轮次及最近失败原因；公共首页在默认视图列出已开启链，输入搜索词时带 `scope=all` 查询全目录，便于发现 dormant 链。公共状态由后端裁剪为 `available`/`unverified` 两档，前端保留未知状态的兼容渲染。自动开启运行状态完全来自 Admin API，不要求启用 Prometheus。
+
+其余偏差（主会话在接线时确认）：
+
+- `build_candidates` 去掉了对端点的 https 前缀二次判断。目录在 chainlist 解析阶段已保证只留公开
+  https，这里重复判断会让离线 mock（http）无法测试晋级链路，故只保留去重。
+- 候选评估器不复用 `ProbeManager` 的工作池，自己持有一个共享 `Semaphore`：
+  `probe_concurrency` 是**跨链的全局上限**，批内多链并行不会放大并发（有测试断言峰值）。
+- `AutoEnableManager` 的 `Metrics` 是可选注入。判定与状态展示都不依赖它，
+  `metrics_enabled = false` 时功能完整（§15.8 的要求）。
+- 自动开启复用 pinned 分支，`state_label()` 仍返回 `pinned`，来源靠 `pinSource` 区分；
+  Dashboard 与 Admin API 用 `pinSource` 展示 config / manual / auto。
+- 启动预热只在 `auto_enable.enabled = true` 时执行；关闭开关等于回到 W8 行为，
+  持久化的 `chains:auto` 不受影响。
+- 公共 overview 同时保留 `chains.serving` 与新增的 `chains.available`（同义），避免破坏既有调用方。
+

@@ -22,6 +22,7 @@ use tower_http::cors::CorsLayer;
 use tracing::warn;
 
 use crate::{
+    autoenable::AutoEnableManager,
     chainlist::{ChainlistLoader, catalog_document},
     config::Config,
     forward::Forwarder,
@@ -46,6 +47,7 @@ pub struct AdminState {
     pub started: Instant,
     pub state_runtime: Arc<tokio::sync::RwLock<StateRuntimeSnapshot>>,
     pub public_cache: Arc<tokio::sync::Mutex<Option<PublicCache>>>,
+    pub auto_enable: Option<Arc<AutoEnableManager>>,
 }
 
 #[derive(Clone)]
@@ -58,6 +60,8 @@ pub struct PublicCache {
 #[derive(Debug, Deserialize, Default)]
 pub struct ChainQuery {
     pub state: Option<String>,
+    /// 公共接口用：`all` 返回全目录，缺省只返回已开启（available）的链。
+    pub scope: Option<String>,
     pub q: Option<String>,
     pub testnet: Option<bool>,
     pub sort: Option<String>,
@@ -137,6 +141,9 @@ pub struct ChainRow {
     pub state: String,
     pub pinned: bool,
     pub disabled: bool,
+    pub pin_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_candidate: Option<crate::autoenable::CandidateProgress>,
     pub catalog_endpoints: usize,
     pub endpoints: usize,
     pub active: usize,
@@ -398,13 +405,16 @@ async fn public_chains(State(s): State<AdminState>, Query(query): Query<ChainQue
         return err(StatusCode::BAD_REQUEST, "invalid_argument", "q is too long");
     }
     let (_, cached_rows) = public_snapshot(&s).await;
+    // 缺省只列已开启的链；搜索或 scope=all 时才展开全目录（disabled 链始终不可见）。
+    let full_scope = query.scope.as_deref() == Some("all")
+        || query.q.as_deref().is_some_and(|q| !q.trim().is_empty());
     let mut rows = cached_rows
         .iter()
-        .filter(|r| r.state != "disabled")
+        .filter(|r| full_scope || r.state == "available")
         .cloned()
         .collect::<Vec<_>>();
     if let Some(state) = query.state.as_deref().filter(|x| *x != "all") {
-        rows.retain(|r| r.state.eq_ignore_ascii_case(state) && r.state != "disabled");
+        rows.retain(|r| r.state.eq_ignore_ascii_case(state));
     }
     if let Some(testnet) = query.testnet {
         rows.retain(|r| r.is_testnet == testnet);
@@ -438,11 +448,7 @@ async fn public_chains(State(s): State<AdminState>, Query(query): Query<ChainQue
 
 async fn public_chain_detail(State(s): State<AdminState>, Path(id): Path<u64>) -> Response {
     let (_, rows) = public_snapshot(&s).await;
-    let Some(row) = rows
-        .iter()
-        .find(|row| row.chain_id == id && row.state != "disabled")
-        .cloned()
-    else {
+    let Some(row) = rows.iter().find(|row| row.chain_id == id).cloned() else {
         return err(StatusCode::NOT_FOUND, "not_found", "unknown chain");
     };
     public_json(serde_json::to_value(row).unwrap_or_else(|_| json!({})))
@@ -459,8 +465,10 @@ async fn public_snapshot(s: &AdminState) -> (Value, Arc<Vec<PublicChainRow>>) {
     let metrics = s.metrics.chain_snapshots();
     let rows = build_rows_with_metrics(s, None, &metrics).await;
     let catalog = s.registry.catalog().await;
+    // disabled 链对外完全不可见：在快照阶段就剔除，后续过滤无需再判断。
     let public_rows = Arc::new(
         rows.iter()
+            .filter(|row| row.state != "disabled")
             .map(|row| public_row(row, catalog.as_deref()))
             .collect::<Vec<_>>(),
     );
@@ -479,7 +487,7 @@ async fn public_snapshot(s: &AdminState) -> (Value, Arc<Vec<PublicChainRow>>) {
     );
     let overview = json!({
         "process":{"version":env!("CARGO_PKG_VERSION"),"uptimeSeconds":s.started.elapsed().as_secs()},
-        "chains":{"catalog":public_rows.len(),"pinned":counts.pinned,"hot":counts.hot,"dormant":counts.dormant,"disabled":counts.disabled,"serving":public_rows.iter().filter(|r| (r.state == "pinned" || r.state == "hot") && r.active > 0).count()},
+        "chains":{"catalog":public_rows.len(),"available":public_rows.iter().filter(|r| r.state == "available").count(),"pinned":counts.pinned,"hot":counts.hot,"dormant":counts.dormant,"disabled":counts.disabled,"serving":public_rows.iter().filter(|r| r.state == "available").count()},
         "endpoints":{"materialized":summaries.iter().map(|x| x.endpoints).sum::<usize>(),"active":summaries.iter().map(|x| x.active).sum::<usize>()},
         "traffic":{"ingressTotal":traffic.ingress,"cacheHitsTotal":traffic.cache_hits,"cacheLookupsTotal":traffic.cache_lookups,"upstreamTotal":traffic.upstream},
         "rpc":{"pathTemplate":"/rpc/{chainId}"}
@@ -490,6 +498,16 @@ async fn public_snapshot(s: &AdminState) -> (Value, Arc<Vec<PublicChainRow>>) {
         rows: Arc::clone(&public_rows),
     });
     (overview, public_rows)
+}
+
+/// 对外只暴露两档状态：有活跃端点的已开启链是 available，其余是 unverified。
+/// 内部生命周期词（pinned/hot/dormant）不出现在公共接口里。
+fn public_state(row: &ChainRow) -> &'static str {
+    if matches!(row.state.as_str(), "pinned" | "hot") && row.active > 0 {
+        "available"
+    } else {
+        "unverified"
+    }
 }
 
 fn public_row(row: &ChainRow, catalog: Option<&crate::chainlist::Catalog>) -> PublicChainRow {
@@ -507,7 +525,7 @@ fn public_row(row: &ChainRow, catalog: Option<&crate::chainlist::Catalog>) -> Pu
             })
         }),
         status: row.status.clone(),
-        state: row.state.clone(),
+        state: public_state(row).to_owned(),
         catalog_endpoints: row.catalog_endpoints,
         endpoints: row.endpoints,
         active: row.active,
@@ -569,7 +587,35 @@ async fn overview(State(s): State<AdminState>, headers: HeaderMap) -> Response {
             },
         );
     let runtime = s.registry.runtime_overrides();
-    Json(json!({"process":{"version":env!("CARGO_PKG_VERSION"),"uptimeSeconds":s.started.elapsed().as_secs()},"chainlist":{"source":rs.source.label(),"lastRefreshUnix":rs.last_refresh_unix,"etag":rs.etag,"catalogChains":rs.catalog_chains,"catalogEndpoints":rs.catalog_endpoints,"refreshSeconds":s.config.chainlist.refresh_seconds,"lastError":rs.last_error,"refreshing":rs.refreshing},"chains":{"catalog":total,"pinned":counts.pinned,"hot":counts.hot,"dormant":counts.dormant,"disabled":counts.disabled},"endpoints":{"materialized":summaries.iter().map(|x|x.endpoints).sum::<usize>(),"active":active,"cooling":cooling,"probation":probation},"traffic":{"ingressTotal":traffic.ingress,"cacheHitsTotal":traffic.cache_hits,"cacheLookupsTotal":traffic.cache_lookups,"coalescedTotal":traffic.coalesced,"upstreamTotal":traffic.upstream,"userVisibleErrorsTotal":traffic.user_visible_errors,"ingressRejectedTotal":s.metrics.ingress_rejected_total(),"hedgesTotal":traffic.hedges,"inFlight":s.metrics.in_flight()},"state":{"backend":s.store.backend_name(),"overrides":runtime.chains.len()+runtime.endpoints.len()},"probe":{"queueDepth":s.registry.probe_queue_depth.load(std::sync::atomic::Ordering::Relaxed),"inFlight":s.registry.probe_in_flight.load(std::sync::atomic::Ordering::Relaxed),"maxConcurrency":s.config.probe.max_concurrency},"cache":{"entries":s.forwarder.cache().entry_count(),"weightedBytes":s.forwarder.cache().weighted_size(),"maxBytes":s.config.cache.max_bytes},"total":total})).into_response()
+    let auto = auto_enable_json(&s).await;
+    Json(json!({"autoEnable":auto,"process":{"version":env!("CARGO_PKG_VERSION"),"uptimeSeconds":s.started.elapsed().as_secs()},"chainlist":{"source":rs.source.label(),"lastRefreshUnix":rs.last_refresh_unix,"etag":rs.etag,"catalogChains":rs.catalog_chains,"catalogEndpoints":rs.catalog_endpoints,"refreshSeconds":s.config.chainlist.refresh_seconds,"lastError":rs.last_error,"refreshing":rs.refreshing},"chains":{"catalog":total,"pinned":counts.pinned,"hot":counts.hot,"dormant":counts.dormant,"disabled":counts.disabled},"endpoints":{"materialized":summaries.iter().map(|x|x.endpoints).sum::<usize>(),"active":active,"cooling":cooling,"probation":probation},"traffic":{"ingressTotal":traffic.ingress,"cacheHitsTotal":traffic.cache_hits,"cacheLookupsTotal":traffic.cache_lookups,"coalescedTotal":traffic.coalesced,"upstreamTotal":traffic.upstream,"userVisibleErrorsTotal":traffic.user_visible_errors,"ingressRejectedTotal":s.metrics.ingress_rejected_total(),"hedgesTotal":traffic.hedges,"inFlight":s.metrics.in_flight()},"state":{"backend":s.store.backend_name(),"overrides":runtime.chains.len()+runtime.endpoints.len()},"probe":{"queueDepth":s.registry.probe_queue_depth.load(std::sync::atomic::Ordering::Relaxed),"inFlight":s.registry.probe_in_flight.load(std::sync::atomic::Ordering::Relaxed),"maxConcurrency":s.config.probe.max_concurrency},"cache":{"entries":s.forwarder.cache().entry_count(),"weightedBytes":s.forwarder.cache().weighted_size(),"maxBytes":s.config.cache.max_bytes},"total":total})).into_response()
+}
+
+/// 自动开启状态块：关闭时 enabled=false，其余计数为 0。
+async fn auto_enable_json(s: &AdminState) -> Value {
+    match s.auto_enable.as_ref() {
+        Some(manager) => {
+            let status = manager.status().await;
+            json!({
+                "enabled": true,
+                "chains": status.chains,
+                "candidates": status.candidates,
+                "pending": status.pending,
+                "capped": status.capped,
+                "lastScanAt": status.last_scan_at,
+                "promotionsTotal": status.promotions_total,
+            })
+        }
+        None => json!({
+            "enabled": false,
+            "chains": 0,
+            "candidates": 0,
+            "pending": 0,
+            "capped": false,
+            "lastScanAt": 0,
+            "promotionsTotal": 0,
+        }),
+    }
 }
 
 async fn chains(
@@ -1172,6 +1218,9 @@ async fn state_import(
     s.forwarder.apply_state_overrides(&value.overrides);
     s.registry.restore_health(&value.health).await;
     s.registry.activate_restored_hot(&value.hot_chains).await;
+    // 自动开启集合以导入内容为准，否则运行中的进程要等重启才认账。
+    s.registry
+        .sync_auto_pinned(value.auto_chains.keys().copied());
     audit(&s, "state.import", "namespace").await;
     Json(json!({"ok":true})).into_response()
 }
@@ -1213,6 +1262,7 @@ async fn state_reset(
     };
     s.registry.apply_overrides(&Overrides::default()).await;
     s.forwarder.apply_state_overrides(&Overrides::default());
+    s.registry.sync_auto_pinned(std::iter::empty());
     s.forwarder.cache().clear().await;
     audit(&s, "state.reset", "namespace").await;
     Json(json!({"ok":true})).into_response()
@@ -1345,6 +1395,10 @@ async fn build_rows_with_metrics(
     metric_snapshots: &HashMap<u64, crate::metrics::ChainMetricsSnapshot>,
 ) -> Vec<ChainRow> {
     let catalog = s.registry.catalog().await;
+    let candidates = match s.auto_enable.as_ref() {
+        Some(manager) => manager.progress_snapshot().await,
+        None => HashMap::new(),
+    };
     let summaries: HashMap<u64, _> = s
         .registry
         .summaries()
@@ -1375,7 +1429,7 @@ async fn build_rows_with_metrics(
         } else {
             None
         };
-        rows.push(ChainRow{chain_id:id,name:c.map_or_else(||format!("Chain {id}"),|x|x.name.clone()),short_name:c.and_then(|x|x.short_name.clone()),is_testnet:c.is_some_and(|x|x.is_testnet),status:c.and_then(|x|x.status.clone()),state:state.clone(),pinned:state=="pinned",disabled:state=="disabled",catalog_endpoints:c.map_or(0,|x|x.endpoints.len()),endpoints:summary.map_or(0,|x|x.endpoints),active:summary.map_or(0,|x|x.active),cooling:summary.map_or(0,|x|x.cooling),probation:summary.map_or(0,|x|x.probation),head:summary.map_or(0,|x|x.head),last_ingress_unix:s.registry.chain_last_ingress(id),ingress_total:metrics.ingress,cache_hits_total:metrics.cache_hits,cache_lookups_total:metrics.cache_lookups,upstream_total:metrics.upstream,user_visible_errors_total:metrics.user_visible_errors,settings:json!({"blockTimeMs":settings.0,"confirmationDepth":settings.1,"tipTtlMs":settings.2,"maxBlockLag":settings.3,"source":settings.4}),endpoint_rows});
+        rows.push(ChainRow{chain_id:id,name:c.map_or_else(||format!("Chain {id}"),|x|x.name.clone()),short_name:c.and_then(|x|x.short_name.clone()),is_testnet:c.is_some_and(|x|x.is_testnet),status:c.and_then(|x|x.status.clone()),state:state.clone(),pinned:state=="pinned",disabled:state=="disabled",pin_source:s.registry.pin_source(id).map(str::to_string),auto_candidate:candidates.get(&id).cloned(),catalog_endpoints:c.map_or(0,|x|x.endpoints.len()),endpoints:summary.map_or(0,|x|x.endpoints),active:summary.map_or(0,|x|x.active),cooling:summary.map_or(0,|x|x.cooling),probation:summary.map_or(0,|x|x.probation),head:summary.map_or(0,|x|x.head),last_ingress_unix:s.registry.chain_last_ingress(id),ingress_total:metrics.ingress,cache_hits_total:metrics.cache_hits,cache_lookups_total:metrics.cache_lookups,upstream_total:metrics.upstream,user_visible_errors_total:metrics.user_visible_errors,settings:json!({"blockTimeMs":settings.0,"confirmationDepth":settings.1,"tipTtlMs":settings.2,"maxBlockLag":settings.3,"source":settings.4}),endpoint_rows});
     }
     rows
 }
@@ -1446,6 +1500,8 @@ mod tests {
     ) -> ChainRow {
         ChainRow {
             chain_id,
+            pin_source: None,
+            auto_candidate: None,
             name: format!("Chain {chain_id}"),
             short_name: None,
             is_testnet: testnet,

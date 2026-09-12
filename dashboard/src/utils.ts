@@ -1,5 +1,5 @@
 import type { ChainRow, ChainState, Overview } from './api/types';
-export const statusMeta = (state: ChainState) => ({ active: ['#0ca30c', 'Active'], hot: ['#0ca30c', 'Hot'], pinned: ['#0ca30c', 'Pinned'], probation: ['#fab219', 'Probation'], cooling: ['#ec835a', 'Cooling'], error: ['#d03b3b', 'Error'], dormant: ['#8b8982', 'Dormant'], disabled: ['#8b8982', 'Disabled'] } as Record<string, [string,string]>)[state] || ['#8b8982', state];
+export const statusMeta = (state: ChainState) => ({ active: ['#0ca30c', 'Active'], hot: ['#0ca30c', 'Hot'], pinned: ['#0ca30c', 'Pinned'], probation: ['#fab219', 'Probation'], cooling: ['#ec835a', 'Cooling'], error: ['#d03b3b', 'Error'], dormant: ['#8b8982', 'Dormant'], disabled: ['#8b8982', 'Disabled'], available: ['#0ca30c', 'Available'], unverified: ['#8b8982', 'Unverified'] } as Record<string, [string,string]>)[state] || ['#8b8982', state];
 export const qpsFromSnapshots = (previous: Overview | undefined, current: Overview, elapsedSeconds: number) => previous && elapsedSeconds > 0 ? Math.max(0, current.traffic.ingressTotal - previous.traffic.ingressTotal) / elapsedSeconds : 0;
 export const hitRate = (x: Overview['traffic']) => x.cacheLookupsTotal ? x.cacheHitsTotal / x.cacheLookupsTotal * 100 : 0;
 export function filterSortChains(rows: ChainRow[], q: string, sort: 'traffic'|'chainId'|'name') {

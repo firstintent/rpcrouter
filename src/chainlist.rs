@@ -57,7 +57,7 @@ pub struct CatalogChain {
 }
 
 /// 目录里的单个端点（含 tracking 元数据）。
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CatalogEndpoint {
     pub url: String,
     pub tracking: Option<String>,

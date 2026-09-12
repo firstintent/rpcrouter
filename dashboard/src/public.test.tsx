@@ -5,10 +5,10 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { PublicChainPage, PublicHomePage } from './components';
 import { CurlExample } from './CurlExample';
 
-const overview = { process: { version: 'x', uptimeSeconds: 1 }, chains: { catalog: 2, pinned: 1, hot: 1, dormant: 0, disabled: 0, serving: 2 }, endpoints: { materialized: 2, active: 2 }, traffic: { ingressTotal: 123, cacheHitsTotal: 100, cacheLookupsTotal: 110, upstreamTotal: 23 }, rpc: { pathTemplate: '/rpc/{chainId}' } };
+const overview = { process: { version: 'x', uptimeSeconds: 1 }, chains: { catalog: 2, pinned: 1, hot: 1, dormant: 0, disabled: 0, serving: 2, available: 2 }, endpoints: { materialized: 2, active: 2 }, traffic: { ingressTotal: 123, cacheHitsTotal: 100, cacheLookupsTotal: 110, upstreamTotal: 23 }, rpc: { pathTemplate: '/rpc/{chainId}' } };
 const chains = { total: 2, items: [
-  { chainId: 1, name: 'Ethereum', shortName: 'eth', isTestnet: false, nativeSymbol: 'ETH', status: 'active', state: 'pinned', catalogEndpoints: 2, endpoints: 2, active: 2, head: 100, ingressTotal: 10, cacheHitsTotal: 8, cacheLookupsTotal: 9 },
-  { chainId: 143, name: 'Monad', shortName: 'mon', isTestnet: false, nativeSymbol: 'MON', status: 'deprecated', state: 'hot', catalogEndpoints: 1, endpoints: 1, active: 1, head: 20, ingressTotal: 4, cacheHitsTotal: 3, cacheLookupsTotal: 4 },
+  { chainId: 1, name: 'Ethereum', shortName: 'eth', isTestnet: false, nativeSymbol: 'ETH', status: 'active', state: 'available', catalogEndpoints: 2, endpoints: 2, active: 2, head: 100, ingressTotal: 10, cacheHitsTotal: 8, cacheLookupsTotal: 9 },
+  { chainId: 143, name: 'Monad', shortName: 'mon', isTestnet: false, nativeSymbol: 'MON', status: 'deprecated', state: 'unverified', catalogEndpoints: 1, endpoints: 1, active: 1, head: 20, ingressTotal: 4, cacheHitsTotal: 3, cacheLookupsTotal: 4 },
 ] };
 
 function renderWithRouter(element: React.ReactNode, initial = '/') {
@@ -25,8 +25,8 @@ describe('public pages', () => {
     });
     renderWithRouter(<PublicHomePage />);
     await waitFor(() => expect(screen.getByText('Ethereum')).toBeInTheDocument());
-    expect(screen.getByText('Chains serving')).toBeInTheDocument(); expect(screen.getByText('123')).toBeInTheDocument(); expect(screen.getAllByRole('button', { name: 'Copy' }).length).toBeGreaterThan(1); expect(fetchMock).toHaveBeenCalled();
-    expect(screen.getByText('Hot')).toBeInTheDocument(); expect(screen.getByText('deprecated')).toBeInTheDocument(); expect(screen.getByText(/Replace/)).toBeInTheDocument();
+    expect(screen.getByText('Chains available')).toBeInTheDocument(); expect(screen.getByText('123')).toBeInTheDocument(); expect(screen.getAllByRole('button', { name: 'Copy' }).length).toBeGreaterThan(1); expect(fetchMock).toHaveBeenCalled();
+    expect(screen.getByText('Available')).toBeInTheDocument(); expect(screen.getByText('Unverified')).toBeInTheDocument(); expect(screen.getByText('Available (on demand)')).toBeInTheDocument(); expect(screen.getByText('deprecated')).toBeInTheDocument(); expect(screen.getByText(/Replace/)).toBeInTheDocument();
     const search = screen.getByRole('textbox', { name: 'Search chains' }); expect(search).toHaveAttribute('maxLength', '64');
     const before = fetchMock.mock.calls.length; fireEvent.change(search, { target: { value: 'eth' } }); expect(fetchMock).toHaveBeenCalledTimes(before); await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before), { timeout: 1000 });
   });
