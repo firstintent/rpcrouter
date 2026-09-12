@@ -448,8 +448,7 @@ async fn public_chains(State(s): State<AdminState>, Query(query): Query<ChainQue
 
 async fn public_chain_detail(State(s): State<AdminState>, Path(id): Path<u64>) -> Response {
     let (_, rows) = public_snapshot(&s).await;
-    let Some(row) = rows.iter().find(|row| row.chain_id == id).cloned()
-    else {
+    let Some(row) = rows.iter().find(|row| row.chain_id == id).cloned() else {
         return err(StatusCode::NOT_FOUND, "not_found", "unknown chain");
     };
     public_json(serde_json::to_value(row).unwrap_or_else(|_| json!({})))

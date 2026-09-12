@@ -455,7 +455,9 @@ impl AutoEnableManager {
             let Ok((candidate, round)) = joined else {
                 continue;
             };
-            if round.failures > 0 && let Some(metrics) = self.metrics.as_ref() {
+            if round.failures > 0
+                && let Some(metrics) = self.metrics.as_ref()
+            {
                 metrics.record_auto_enable_probe_failures(round.failures as u64);
             }
             let ready = {
