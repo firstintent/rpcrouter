@@ -177,7 +177,7 @@ async fn probe_endpoint(
     slow: Duration,
 ) -> Option<u64> {
     let req_id = json!(1);
-    let call = |method: &str| async {
+    let call = |method: &'static str| async move {
         client
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -222,7 +222,7 @@ async fn probe_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chainlist::{Catalog, CatalogEndpoint};
+    use crate::chainlist::{Catalog, CatalogChain, CatalogEndpoint};
     use std::collections::HashMap;
     #[test]
     fn candidate_filters_and_scores() {
