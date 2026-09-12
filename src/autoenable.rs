@@ -186,15 +186,9 @@ async fn probe_endpoint(
             .await
     };
     let r1 = timeout(timeout_d, call("eth_chainId")).await.ok()?.ok()?;
+    let h1 = r1.headers().clone();
     let b1 = r1.bytes().await.ok()?;
-    let c1 = classify_response(
-        StatusCode::OK,
-        &r1.headers(),
-        &b1,
-        Duration::ZERO,
-        &req_id,
-        slow,
-    );
+    let c1 = classify_response(StatusCode::OK, &h1, &b1, Duration::ZERO, &req_id, slow);
     let v1 = match c1 {
         ResponseClassification::Valid(v) | ResponseClassification::Degraded { response: v, .. } => {
             v
@@ -212,15 +206,9 @@ async fn probe_endpoint(
         .await
         .ok()?
         .ok()?;
+    let h2 = r2.headers().clone();
     let b2 = r2.bytes().await.ok()?;
-    let c2 = classify_response(
-        StatusCode::OK,
-        &r2.headers(),
-        &b2,
-        Duration::ZERO,
-        &req_id,
-        slow,
-    );
+    let c2 = classify_response(StatusCode::OK, &h2, &b2, Duration::ZERO, &req_id, slow);
     let v2 = match c2 {
         ResponseClassification::Valid(v) | ResponseClassification::Degraded { response: v, .. } => {
             v
