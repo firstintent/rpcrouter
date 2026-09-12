@@ -22,6 +22,7 @@ use tower_http::cors::CorsLayer;
 use tracing::warn;
 
 use crate::{
+    autoenable::AutoEnableManager,
     chainlist::{ChainlistLoader, catalog_document},
     config::Config,
     forward::Forwarder,
@@ -46,6 +47,7 @@ pub struct AdminState {
     pub started: Instant,
     pub state_runtime: Arc<tokio::sync::RwLock<StateRuntimeSnapshot>>,
     pub public_cache: Arc<tokio::sync::Mutex<Option<PublicCache>>>,
+    pub auto_enable: Option<Arc<AutoEnableManager>>,
 }
 
 #[derive(Clone)]
@@ -137,6 +139,9 @@ pub struct ChainRow {
     pub state: String,
     pub pinned: bool,
     pub disabled: bool,
+    pub pin_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_candidate: Option<crate::autoenable::CandidateProgress>,
     pub catalog_endpoints: usize,
     pub endpoints: usize,
     pub active: usize,
@@ -1375,7 +1380,7 @@ async fn build_rows_with_metrics(
         } else {
             None
         };
-        rows.push(ChainRow{chain_id:id,name:c.map_or_else(||format!("Chain {id}"),|x|x.name.clone()),short_name:c.and_then(|x|x.short_name.clone()),is_testnet:c.is_some_and(|x|x.is_testnet),status:c.and_then(|x|x.status.clone()),state:state.clone(),pinned:state=="pinned",disabled:state=="disabled",catalog_endpoints:c.map_or(0,|x|x.endpoints.len()),endpoints:summary.map_or(0,|x|x.endpoints),active:summary.map_or(0,|x|x.active),cooling:summary.map_or(0,|x|x.cooling),probation:summary.map_or(0,|x|x.probation),head:summary.map_or(0,|x|x.head),last_ingress_unix:s.registry.chain_last_ingress(id),ingress_total:metrics.ingress,cache_hits_total:metrics.cache_hits,cache_lookups_total:metrics.cache_lookups,upstream_total:metrics.upstream,user_visible_errors_total:metrics.user_visible_errors,settings:json!({"blockTimeMs":settings.0,"confirmationDepth":settings.1,"tipTtlMs":settings.2,"maxBlockLag":settings.3,"source":settings.4}),endpoint_rows});
+        rows.push(ChainRow{chain_id:id,name:c.map_or_else(||format!("Chain {id}"),|x|x.name.clone()),short_name:c.and_then(|x|x.short_name.clone()),is_testnet:c.is_some_and(|x|x.is_testnet),status:c.and_then(|x|x.status.clone()),state:state.clone(),pinned:state=="pinned",disabled:state=="disabled",pin_source:s.registry.pin_source(id).map(str::to_string),auto_candidate:None,catalog_endpoints:c.map_or(0,|x|x.endpoints.len()),endpoints:summary.map_or(0,|x|x.endpoints),active:summary.map_or(0,|x|x.active),cooling:summary.map_or(0,|x|x.cooling),probation:summary.map_or(0,|x|x.probation),head:summary.map_or(0,|x|x.head),last_ingress_unix:s.registry.chain_last_ingress(id),ingress_total:metrics.ingress,cache_hits_total:metrics.cache_hits,cache_lookups_total:metrics.cache_lookups,upstream_total:metrics.upstream,user_visible_errors_total:metrics.user_visible_errors,settings:json!({"blockTimeMs":settings.0,"confirmationDepth":settings.1,"tipTtlMs":settings.2,"maxBlockLag":settings.3,"source":settings.4}),endpoint_rows});
     }
     rows
 }
