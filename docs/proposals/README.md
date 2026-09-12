@@ -31,7 +31,7 @@
 
 | 日期 | 提案 | 状态 | 关联 |
 |---|---|---|---|
-| 2026-09-12 | [自动开启优质 EVM 链](2026-09-12-auto-enable-chains/) | 开发中 | DESIGN-v2 §15 / TASKS-v2 W9 |
+| 2026-09-12 | [自动开启优质 EVM 链](2026-09-12-auto-enable-chains/) | 已交付 | DESIGN-v2 §15 / TASKS-v2 W9 |
 | 2026-08-26 | [公共只读主页](2026-08-26-public-site/) | 已交付 | DESIGN-v2 §14 / TASKS-v2 W8 |
 | 2026-08-25 | [动态全链目录 + 状态控制 Dashboard](2026-08-25-dynamic-chains-dashboard/) | 已交付 | DESIGN-v2 / TASKS-v2 W5–W7 |
 | 2026-07-26 | [v1 之后的规划 P1–P5](2026-07-26-roadmap-p1-p5/) | P1–P3 已交付 | ROADMAP.md |

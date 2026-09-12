@@ -188,7 +188,9 @@ W6b 验收（离线，axum `oneshot` + 进程内 mock 上游 + MemoryStore）：
      四门槛全绿；`npm run build` 产物在 `/` 与 `/dashboard/` 两个入口都能加载（手动 `vite preview`
      或 curl 断言 index.html 引用的 asset 路径为 `/dashboard/assets/...`）。
 
-## W9 — 自动开启优质链（分支 `w9-auto-enable`，DESIGN-v2 §15）
+## W9 — 自动开启优质链（分支 `w9-auto-enable`，DESIGN-v2 §15）✅ 2026-09-12 合入 main
+（maker codex 三轮交付骨架与接口层，核心扫描/晋级接线与验收由主会话补齐；一轮 checker
+3 must-fix + 2 should-fix + 1 nit 全修；161 Rust 用例 + 1 Redis ignored + 前端 12 例）
 
 > 2026-09-12 用户决策：默认按规则批量开启优质 EVM 链，不需要人工在控制台配置；
 > **只增不减，减法只有人工**；自动开启的判定与观察**不依赖 Prometheus**。
