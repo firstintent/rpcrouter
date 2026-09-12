@@ -1294,6 +1294,17 @@ impl Registry {
         enabled
     }
 
+    /// 人工墓碑：被显式 unpin 或 disable 的链，自动开启规则永远跳过。
+    pub fn tombstoned_chain_ids(&self) -> std::collections::HashSet<u64> {
+        self.runtime_chain_overrides
+            .iter()
+            .filter(|entry| {
+                entry.value().pinned == Some(false) || entry.value().disabled == Some(true)
+            })
+            .map(|entry| *entry.key())
+            .collect()
+    }
+
     pub fn auto_chain_ids(&self) -> Vec<u64> {
         self.auto_pinned
             .iter()
@@ -1304,7 +1315,11 @@ impl Registry {
     pub fn pin_source(&self, chain_id: u64) -> Option<&'static str> {
         if self.config.chains.contains(&chain_id) {
             Some("config")
-        } else if self.runtime_pinned.contains_key(&chain_id) {
+        } else if self
+            .runtime_pinned
+            .get(&chain_id)
+            .is_some_and(|value| *value)
+        {
             Some("manual")
         } else if self.auto_pinned.contains_key(&chain_id) {
             Some("auto")

@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use axum::ServiceExt;
 use rpcrouter::{
     admin::AdminState,
+    autoenable::AutoEnableManager,
     chainlist::{ChainlistLoader, catalog_document},
     config::Config,
     forward::Forwarder,
@@ -146,6 +147,24 @@ async fn main() -> Result<()> {
     );
     let probes = Arc::new(ProbeManager::new(Arc::clone(&registry), &config)?);
     spawn_probes(Arc::clone(&probes), Arc::clone(&metrics));
+    // 自动开启：恢复持久化集合并预热，然后起后台评估任务（关闭时两者都不做）。
+    let auto_enable = if config.discovery.auto_enable.enabled {
+        let manager = Arc::new(AutoEnableManager::new(
+            Arc::clone(&registry),
+            Arc::clone(&store),
+            &config,
+        )?);
+        manager.preheat(&boot.auto_chains).await;
+        let task = Arc::clone(&manager);
+        supervisor::spawn("auto-enable", Arc::clone(&metrics), move || {
+            let task = Arc::clone(&task);
+            async move { task.run().await }
+        });
+        Some(manager)
+    } else {
+        None
+    };
+    let _ = &auto_enable;
     let initial_up = store.health().await;
     metrics.set_state_store_up(initial_up);
     state_runtime.write().await.up = initial_up;
