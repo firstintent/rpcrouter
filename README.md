@@ -204,3 +204,9 @@ sudo systemctl enable --now rpcrouter
 - release 构建不会改变对外保护：诚实发送 `rpcrouter/<version>` User-Agent，默认严格限制
   单端点 15 rps/8 并发，429 时退避换点。运营者应尊重每个公共 RPC 的条款，不把多端点聚合
   当作绕过单一供应商配额的手段。
+
+### 自动开启优质链（W9）
+
+启用 `discovery.auto_enable` 后，网关会从动态目录中自动发现并开启优质 EVM 主网链。默认档位为：去重后的公开 HTTPS 端点至少 5 个，每链每轮最多抽样 8 个端点，连续 2 轮至少 2 个端点通过 `eth_chainId` 与区块高度校验后晋级。候选扫描使用有界并发和本地探针结果，不依赖 Prometheus；状态通过 Admin API 和 Dashboard 的候选视图展示。
+
+自动集合遵循只增不减策略，达到 `max_chains` 后停止新增且不会淘汰已开启链。需要移除链时，请在 Dashboard 的链列表执行人工 Unpin 或 Disable；人工墓碑会阻止后续自动重新加入。可通过 `RPCROUTER_AUTO_ENABLE_ENABLED`、`RPCROUTER_AUTO_ENABLE_MIN_ENDPOINTS` 和 `RPCROUTER_AUTO_ENABLE_MAX_CHAINS` 调整开关与档位。
