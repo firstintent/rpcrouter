@@ -1,15 +1,11 @@
 //! 自动开启候选评估器：独立于 Registry 的轻量探测逻辑。
 use crate::{
-    chainlist::{Catalog, CatalogChain, CatalogEndpoint},
+    chainlist::{Catalog, CatalogEndpoint},
     signals::{ResponseClassification, classify_response},
 };
 use reqwest::{Client, StatusCode};
-use serde_json::{Value, json};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use serde_json::json;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::time::timeout;
 
 #[derive(Clone, Debug)]
@@ -184,7 +180,8 @@ async fn probe_endpoint(
     let call = |method: &str| async {
         client
             .post(url)
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":[]}))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(json!({"jsonrpc":"2.0","id":1,"method":method,"params":[]}).to_string())
             .send()
             .await
     };
@@ -237,7 +234,7 @@ async fn probe_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chainlist::{Catalog, CatalogChain, CatalogEndpoint};
+    use crate::chainlist::{Catalog, CatalogEndpoint};
     use std::collections::HashMap;
     #[test]
     fn candidate_filters_and_scores() {
