@@ -199,6 +199,21 @@ pub async fn probe_candidate_with_semaphore(
     }
 }
 
+/// 候选探测的响应体上限，与 `probe.rs` 的探针保持一致：上游不可信，不能无限读。
+const CANDIDATE_BODY_LIMIT: usize = 1024 * 1024;
+
+/// 流式读取响应体，超过上限即放弃（返回 None 视为该端点不合格）。
+async fn read_capped(mut response: reqwest::Response) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > CANDIDATE_BODY_LIMIT {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
+}
+
 async fn probe_endpoint(
     client: &Client,
     url: &str,
@@ -218,7 +233,7 @@ async fn probe_endpoint(
     let r1 = timeout(timeout_d, call("eth_chainId")).await.ok()?.ok()?;
     let h1 = r1.headers().clone();
     let r1_status = r1.status();
-    let b1 = r1.bytes().await.ok()?;
+    let b1 = read_capped(r1).await?;
     let c1 = classify_response(r1_status, &h1, &b1, Duration::ZERO, &req_id, slow);
     let v1 = match c1 {
         ResponseClassification::Valid(v) | ResponseClassification::Degraded { response: v, .. } => {
@@ -239,7 +254,7 @@ async fn probe_endpoint(
         .ok()?;
     let h2 = r2.headers().clone();
     let r2_status = r2.status();
-    let b2 = r2.bytes().await.ok()?;
+    let b2 = read_capped(r2).await?;
     let c2 = classify_response(r2_status, &h2, &b2, Duration::ZERO, &req_id, slow);
     let v2 = match c2 {
         ResponseClassification::Valid(v) | ResponseClassification::Degraded { response: v, .. } => {

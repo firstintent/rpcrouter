@@ -1305,11 +1305,51 @@ impl Registry {
             .collect()
     }
 
+    /// 用状态存储里的自动开启集合替换内存集合（导入/重置/重连后调用）。
+    pub fn sync_auto_pinned<I>(&self, chain_ids: I)
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let next = chain_ids
+            .into_iter()
+            .filter(|id| !self.is_tombstoned(*id))
+            .collect::<std::collections::HashSet<_>>();
+        let stale = self
+            .auto_pinned
+            .iter()
+            .map(|entry| *entry.key())
+            .filter(|id| !next.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            self.auto_pinned.remove(&id);
+            if let Some(state) = self.chain(id) {
+                state
+                    .pinned
+                    .store(self.is_pinned_chain(id), Ordering::Relaxed);
+            }
+        }
+        for id in next {
+            self.auto_pinned.insert(id, true);
+            if let Some(state) = self.chain(id) {
+                state
+                    .pinned
+                    .store(self.is_pinned_chain(id), Ordering::Relaxed);
+            }
+        }
+    }
+
     pub fn auto_chain_ids(&self) -> Vec<u64> {
         self.auto_pinned
             .iter()
-            .filter_map(|e| (*e.value()).then_some(*e.key()))
+            .filter_map(|e| (*e.value() && !self.is_tombstoned(*e.key())).then_some(*e.key()))
             .collect()
+    }
+
+    /// 人工墓碑判定：被显式 unpin 或 disable 的链。
+    fn is_tombstoned(&self, chain_id: u64) -> bool {
+        self.runtime_chain_overrides
+            .get(&chain_id)
+            .is_some_and(|value| value.pinned == Some(false) || value.disabled == Some(true))
     }
 
     pub fn pin_source(&self, chain_id: u64) -> Option<&'static str> {
@@ -1321,7 +1361,7 @@ impl Registry {
             .is_some_and(|value| *value)
         {
             Some("manual")
-        } else if self.auto_pinned.contains_key(&chain_id) {
+        } else if self.auto_pinned.contains_key(&chain_id) && !self.is_tombstoned(chain_id) {
             Some("auto")
         } else {
             None

@@ -57,12 +57,21 @@ fn chain(chain_id: u64, name: &str, testnet: bool, urls: Vec<String>) -> Catalog
 
 /// 目录里三条链：1 已开启且有活跃端点，7 是 dormant（只在搜索里可见），9 被禁用。
 async fn app(metrics_enabled: bool, with_manager: bool) -> (Router, Arc<Registry>) {
+    app_with_token(metrics_enabled, with_manager, None).await
+}
+
+async fn app_with_token(
+    metrics_enabled: bool,
+    with_manager: bool,
+    token: Option<&str>,
+) -> (Router, Arc<Registry>) {
     let url = mock().await;
     let mut config = Config {
         chains: Vec::new(),
         ..Config::default()
     };
     config.metrics_enabled = metrics_enabled;
+    config.admin.auth_token = token.map(str::to_owned);
     let registry = Arc::new(Registry::new(&config));
     registry
         .set_catalog(Arc::new(Catalog {
@@ -127,7 +136,7 @@ async fn get(service: &Router, path: &str) -> axum::response::Response {
         .clone()
         .oneshot(
             Request::get(path)
-                .header(AUTHORIZATION, "Bearer ignored")
+                .header(AUTHORIZATION, "Bearer secret")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -257,4 +266,52 @@ async fn overview_reports_disabled_auto_enable() {
     let overview = json(get(&service, "/admin/api/overview").await).await;
     assert_eq!(overview["autoEnable"]["enabled"], false);
     assert_eq!(overview["autoEnable"]["chains"], 0);
+}
+
+async fn post(service: &Router, path: &str, body: Value) -> axum::response::Response {
+    service
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, "Bearer secret")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn state_import_and_reset_take_effect_on_the_running_process() {
+    let (service, registry) = app_with_token(true, true, Some("secret")).await;
+    assert!(registry.auto_chain_ids().is_empty());
+
+    let export = serde_json::json!({
+        "schemaVersion": rpcrouter::state::SCHEMA_VERSION,
+        "overrides": {"chains": {}, "endpoints": {}},
+        "health": [],
+        "hotChains": [],
+        "autoChains": {"7": {"enabledAt": 1, "endpoints": 5, "activeSeen": 2, "head": 9}}
+    });
+    let response = post(&service, "/admin/api/state/import", export).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        registry.auto_chain_ids(),
+        vec![7],
+        "导入后运行中的进程就该认账，不能等重启"
+    );
+    assert_eq!(registry.pin_source(7), Some("auto"));
+
+    let response = post(
+        &service,
+        "/admin/api/state/reset",
+        serde_json::json!({"confirm": true}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        registry.auto_chain_ids().is_empty(),
+        "reset 必须同时清空内存里的自动开启集合"
+    );
 }

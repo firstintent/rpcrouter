@@ -383,3 +383,154 @@ async fn enabled_chain_survives_dead_endpoints_and_restart() {
     assert_eq!(manager2.preheat(&boot.auto_chains).await, 1);
     assert_eq!(restarted.auto_chain_ids(), vec![9007]);
 }
+
+#[tokio::test]
+async fn oversized_probe_response_is_rejected() {
+    // 上游返回超过 1MiB 的响应体：探测必须放弃，不得把整个响应读进内存。
+    async fn flood() -> String {
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\",\"pad\":\"{}\"}}",
+            "a".repeat(2 * 1024 * 1024)
+        )
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let app = axum::Router::new().route("/", axum::routing::post(flood));
+        let _ = axum::serve(listener, app).await;
+    });
+    let flooding = format!("http://{address}/");
+    let (good, _) = spawn_upstream(9008, 10, 0).await;
+    let config = config(2, 10, 8);
+    let registry = registry_with(catalog(vec![(9008, vec![good, flooding])]), &config).await;
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::default());
+    let manager = AutoEnableManager::new(Arc::clone(&registry), store, &config).expect("manager");
+
+    manager.run_once().await;
+    manager.run_once().await;
+    assert!(
+        registry.auto_chain_ids().is_empty(),
+        "超大响应端点不算合格，合格端点不足 2 个不应晋级"
+    );
+}
+
+#[tokio::test]
+async fn manual_tombstone_frees_the_cap_slot() {
+    let (a1, _) = spawn_upstream(9009, 10, 0).await;
+    let (a2, _) = spawn_upstream(9009, 10, 0).await;
+    let (b1, _) = spawn_upstream(9010, 10, 0).await;
+    let (b2, _) = spawn_upstream(9010, 10, 0).await;
+    let config = config(2, 1, 8);
+    let registry = registry_with(
+        catalog(vec![(9009, vec![a1, a2]), (9010, vec![b1, b2])]),
+        &config,
+    )
+    .await;
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::default());
+    let manager = AutoEnableManager::new(Arc::clone(&registry), Arc::clone(&store), &config)
+        .expect("manager");
+    for _ in 0..3 {
+        manager.run_once().await;
+    }
+    let first = registry.auto_chain_ids();
+    assert_eq!(first.len(), 1);
+
+    // 人工取消开启后：该链不再算作 auto（不占名额、不报 pinSource=auto），另一条链才能补位。
+    registry
+        .apply_override(
+            first[0],
+            ChainOverrideState {
+                pinned: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(registry.pin_source(first[0]), None);
+    assert!(registry.auto_chain_ids().is_empty());
+    for _ in 0..3 {
+        manager.run_once().await;
+    }
+    let second = registry.auto_chain_ids();
+    assert_eq!(second.len(), 1);
+    assert_ne!(second[0], first[0], "被取消开启的链不得重新占用名额");
+}
+
+#[tokio::test]
+async fn file_store_import_export_preserves_auto_chains() {
+    let dir = std::env::temp_dir().join(format!("rpcrouter-w9-{}", std::process::id()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let path = dir.join("state.json");
+    let _ = tokio::fs::remove_file(&path).await;
+    let store = rpcrouter::state::FileStore::open(&path).await.unwrap();
+    store.bootstrap().await.unwrap();
+    store
+        .put_auto_chain(
+            8888,
+            &AutoChainState {
+                enabled_at: 1,
+                endpoints: 5,
+                active_seen: 3,
+                head: 42,
+            },
+        )
+        .await
+        .unwrap();
+    let exported = store.export().await.unwrap();
+    assert!(exported.auto_chains.contains_key(&8888));
+
+    let restored_path = dir.join("state-restored.json");
+    let _ = tokio::fs::remove_file(&restored_path).await;
+    let restored = rpcrouter::state::FileStore::open(&restored_path)
+        .await
+        .unwrap();
+    restored.bootstrap().await.unwrap();
+    restored.import(&exported).await.unwrap();
+    let boot = restored.bootstrap().await.unwrap();
+    assert!(
+        boot.auto_chains.contains_key(&8888),
+        "导入必须恢复自动开启集合，否则等于机器做减法"
+    );
+
+    restored.reset().await.unwrap();
+    assert!(restored.bootstrap().await.unwrap().auto_chains.is_empty());
+}
+
+/// Redis import 会先 DEL 整个命名空间，必须把 `chains:auto` 写回去。
+/// 需要本地 Redis：`REDIS_URL=redis://127.0.0.1:6379/0 cargo test -- --ignored`。
+#[tokio::test]
+#[ignore]
+async fn redis_import_preserves_auto_chains() {
+    let Ok(url) = std::env::var("REDIS_URL") else {
+        eprintln!("skipping Redis test: REDIS_URL is not set");
+        return;
+    };
+    let namespace = format!("w9-auto-{}", std::process::id());
+    let store = rpcrouter::state::RedisStore::connect(&url, &namespace)
+        .await
+        .unwrap();
+    store.reset().await.unwrap();
+    store.bootstrap().await.unwrap();
+    store
+        .put_auto_chain(
+            4242,
+            &AutoChainState {
+                enabled_at: 7,
+                endpoints: 6,
+                active_seen: 3,
+                head: 99,
+            },
+        )
+        .await
+        .unwrap();
+    let exported = store.export().await.unwrap();
+    assert!(exported.auto_chains.contains_key(&4242));
+
+    store.import(&exported).await.unwrap();
+    let boot = store.bootstrap().await.unwrap();
+    assert!(
+        boot.auto_chains.contains_key(&4242),
+        "Redis import 必须恢复 chains:auto"
+    );
+    store.reset().await.unwrap();
+    assert!(store.bootstrap().await.unwrap().auto_chains.is_empty());
+}

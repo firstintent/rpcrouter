@@ -656,6 +656,7 @@ impl StateStore for FileStore {
         d.overrides = v.overrides.clone();
         d.health = v.health.clone();
         d.hot_chains = v.hot_chains.clone();
+        d.auto_chains = v.auto_chains.clone();
         d.catalog_etag = v.catalog_etag.clone();
         d.catalog_fetched_at = v.catalog_fetched_at;
         drop(d);
@@ -1138,6 +1139,13 @@ impl StateStore for RedisStore {
                 .arg(*score)
                 .arg(*id);
         }
+        // 自动开启集合必须随导入恢复：import 前面已 DEL 整个命名空间，漏写等于机器做减法。
+        for (id, value) in &v.auto_chains {
+            p.cmd("HSET")
+                .arg(self.key("chains:auto"))
+                .arg(id.to_string())
+                .arg(serde_json::to_string(value)?);
+        }
         let mut c = self.manager.lock().await;
         let _: () = timeout(Duration::from_secs(5), p.query_async(&mut *c))
             .await
@@ -1261,10 +1269,17 @@ impl StateStore for ResilientStore {
         self.fallback.load_auto_chains().await
     }
     async fn put_auto_chain(&self, id: u64, v: &AutoChainState) -> Result<()> {
-        self.fallback.put_auto_chain(id, v).await?;
-        if let Some(p) = self.primary().await {
-            let _ = p.put_auto_chain(id, v).await;
+        // 与其他权威写一致：primary 先写成功才写 fallback，失败直接报错让晋级顺延，
+        // 否则多实例部署下 Redis 丢记录会在重启后变成「机器做减法」。
+        let p = self
+            .primary()
+            .await
+            .context("Redis state store is unavailable")?;
+        if let Err(error) = p.put_auto_chain(id, v).await {
+            self.failed().await;
+            return Err(error);
         }
+        self.fallback.put_auto_chain(id, v).await?;
         Ok(())
     }
     async fn bootstrap(&self) -> Result<BootstrapState> {

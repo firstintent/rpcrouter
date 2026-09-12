@@ -409,6 +409,10 @@ fn spawn_state_reconnect(
                             registry.apply_overrides(&overrides).await;
                             forwarder.apply_state_overrides(&overrides);
                         }
+                        // 覆写与自动开启集合都以重连后的 Redis 为准。
+                        if let Ok(auto) = store.load_auto_chains().await {
+                            registry.sync_auto_pinned(auto.keys().copied());
+                        }
                         info!("state store reconnected and Redis overrides applied");
                         delay = Duration::from_secs(1);
                     }

@@ -1218,6 +1218,9 @@ async fn state_import(
     s.forwarder.apply_state_overrides(&value.overrides);
     s.registry.restore_health(&value.health).await;
     s.registry.activate_restored_hot(&value.hot_chains).await;
+    // 自动开启集合以导入内容为准，否则运行中的进程要等重启才认账。
+    s.registry
+        .sync_auto_pinned(value.auto_chains.keys().copied());
     audit(&s, "state.import", "namespace").await;
     Json(json!({"ok":true})).into_response()
 }
@@ -1259,6 +1262,7 @@ async fn state_reset(
     };
     s.registry.apply_overrides(&Overrides::default()).await;
     s.forwarder.apply_state_overrides(&Overrides::default());
+    s.registry.sync_auto_pinned(std::iter::empty());
     s.forwarder.cache().clear().await;
     audit(&s, "state.reset", "namespace").await;
     Json(json!({"ok":true})).into_response()
