@@ -163,12 +163,8 @@ pub trait StateStore: Send + Sync {
     async fn flush_health(&self, batch: &[HealthSnapshot]) -> Result<()>;
     async fn load_health(&self) -> Result<Vec<HealthSnapshot>>;
     async fn set_hot_chains(&self, chains: &[(u64, u64)]) -> Result<()>;
-    async fn load_auto_chains(&self) -> Result<BTreeMap<u64, AutoChainState>> {
-        Ok(BTreeMap::new())
-    }
-    async fn put_auto_chain(&self, _chain_id: u64, _value: &AutoChainState) -> Result<()> {
-        Ok(())
-    }
+    async fn load_auto_chains(&self) -> Result<BTreeMap<u64, AutoChainState>>;
+    async fn put_auto_chain(&self, chain_id: u64, value: &AutoChainState) -> Result<()>;
     async fn append_audit(&self, what: &str, target: &str) -> Result<()>;
     async fn export(&self) -> Result<StateExport>;
     async fn import(&self, value: &StateExport) -> Result<()>;
@@ -526,7 +522,6 @@ impl StateStore for FileStore {
             overrides: d.overrides.clone(),
             health: d.health.clone(),
             hot_chains: d.hot_chains.clone(),
-            auto_chains: d.auto_chains.clone(),
             catalog_etag: d.catalog_etag.clone(),
             catalog_fetched_at: d.catalog_fetched_at,
         })
@@ -1064,7 +1059,6 @@ impl StateStore for RedisStore {
             overrides: d.overrides,
             health: d.health,
             hot_chains: d.hot_chains,
-            auto_chains: d.auto_chains,
             catalog_etag: d.catalog_etag,
             catalog_fetched_at: d.catalog_fetched_at,
         })
@@ -1251,22 +1245,8 @@ impl ResilientStore {
 
 #[async_trait]
 impl StateStore for ResilientStore {
-    async fn load_auto_chains(&self) -> Result<BTreeMap<u64, AutoChainState>> {
-        if let Some(p) = self.primary().await {
-            if let Ok(v) = p.load_auto_chains().await {
-                return Ok(v);
-            }
-            self.failed().await;
-        }
-        self.fallback.load_auto_chains().await
-    }
-    async fn put_auto_chain(&self, id: u64, v: &AutoChainState) -> Result<()> {
-        self.fallback.put_auto_chain(id, v).await?;
-        if let Some(p) = self.primary().await {
-            let _ = p.put_auto_chain(id, v).await;
-        }
-        Ok(())
-    }
+    async fn load_auto_chains(&self)->Result<BTreeMap<u64,AutoChainState>> { if let Some(p)=self.primary().await { if let Ok(v)=p.load_auto_chains().await{return Ok(v)} self.failed().await;} self.fallback.load_auto_chains().await }
+    async fn put_auto_chain(&self,id:u64,v:&AutoChainState)->Result<()> { self.fallback.put_auto_chain(id,v).await?; if let Some(p)=self.primary().await { let _=p.put_auto_chain(id,v).await; } Ok(()) }
     async fn bootstrap(&self) -> Result<BootstrapState> {
         if let Some(p) = self.primary().await {
             match p.bootstrap().await {
