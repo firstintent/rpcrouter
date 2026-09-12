@@ -463,3 +463,129 @@ userVisibleErrors、审计。公共 API 走与 RPC 相同的入口防护层（bo
 - 公共页不含任何控制入口；公共 API 只 GET，不接受 token（带了也忽略）。
 - 输入校验与 `/admin/api/chains` 一致（`limit`/`offset` 数值、`q` 长度 ≤ 64）。
 - 静态托管路径校验复用 `static_file`（不新增文件系统读取入口，根路径仅返回 index.html）。
+
+## 15. 自动开启（Auto-Enable，2026-09-12 增补）
+
+用户决策：**默认按规则批量开启所有可用的优质 EVM 链，不需要人工在控制台逐条配置**；
+规则筛「公共 RPC 稳定、数量多、质量好」的链。补充约束：**只增不减，减法只有人工**。
+
+### 15.1 目标与边界
+
+现状里 `discovery.enabled = true` 已让目录内任意链「按需可路由」，本节要补的是三件事：
+
+1. **常驻开启**：优质链启动即预热（materialize + 常驻探针），不必等第一个请求冷启动；
+2. **规则化筛选**：常驻集合由规则算出并随目录刷新增量扩张，不再靠 `config.chains` 手写；
+3. **对外可用语义**：公共主页默认只列「已开启且实测可用」的链，其余靠搜索可见。
+
+非目标：不改路由层的按需激活（未开启链仍可被请求激活为 hot）；不改端点级健康状态机。
+
+### 15.2 只增不减（硬约束）
+
+- 作用域是**链级开启状态**。端点级冷却摘除 / 恢复回池（硬指标 2）不受影响，照旧运行。
+- 规则只把链**加入**自动开启集合，永不自动移除。已开启链即使全部端点失效，也保持开启，
+  仅在展示上体现为不可用。
+- 集合**必须持久化**（`chains:auto`）：重启后重算若丢链，等于机器做减法，违反约束。
+  状态存储不可写时**暂停晋级**（不在内存里单独生效），避免重启后集合回退。
+- 唯一的减法是人工，复用既有 Admin 动作，不新增 API 语义：
+  - `unpin`（`override.pinned = false`）= 取消开启，链回到 dormant，仍按需激活；
+  - `disable`（`override.disabled = true`）= 拒绝服务（403）。
+  - 两者都是**墓碑**：规则引擎永远跳过带这两个覆写的链。重新纳入靠人工 `pin` 或清除覆写。
+- 优先级：`config.chains`（config pinned） > 人工覆写 > 自动开启。
+
+### 15.3 候选评估器（`src/autoenable.rs`，独立后台任务）
+
+不为候选链建 `ChainState`（否则几百条链的运行态与 `chains:hot` 会被污染），候选评估走独立的
+轻量探测器，只读 Catalog，结果留在内存评估表里。
+
+静态候选（每轮从最新 Catalog 重建）：
+
+- 非测试网（`is_testnet == false`；测试网只按需 hot 激活）；
+- 不在 `discovery.deny`；无人工墓碑（`pinned=false` / `disabled=true`）；
+- 不在自动集合、不是 config pinned；
+- 去重后公开 https 端点数 ≥ `min_endpoints`（默认 5）；
+- 按打分排序决定探测优先级（不做门槛）：端点数 + `tracking=none` 端点数加权 + `tvl` 加分 +
+  `status=active` 加分；候选池上限 `max_candidates`（默认 512）。
+
+探测（轮转分批，限制探针放大）：
+
+- 每 `candidate_interval_seconds`（默认 30）取 `probe_batch`（默认 32）条候选链，指针滚动，
+  512 条候选约 8 分钟扫完一遍；有界并发 `probe_concurrency`（默认 8）。
+- 每链采样 `max_endpoints_per_chain`（默认 8）个端点，优先 `tracking=none`。
+- 每端点先 `eth_chainId` 后 `eth_blockNumber`，超时用 `probe.request_timeout_ms`。
+  合格端点 = HTTP 200 + 无 JSON-RPC error + **chainId 与目录一致**（防假节点/目录错配）+
+  head 可解析。
+- 单轮链合格 = 合格端点 ≥ `min_active_endpoints`（默认 2），且其中至少 2 个端点的 head 落在
+  `[max_head - head_tolerance_blocks, max_head]`（默认 64，兼容快链）。
+- 连续 `promote_after_rounds`（默认 2）轮合格 → 晋级；中断则计数归零（这只是「还没加入」，
+  不构成减法）。
+
+### 15.4 晋级与生效
+
+1. 写 `chains:auto`（失败 → 不晋级，下一轮重试）；
+2. `registry` 标记 auto pinned：**复用 pinned 分支**（不 idle 降级、不参与 `max_hot_chains`
+   LRU 淘汰、`state_label()` 返回 `pinned`），另记 `pin_source = auto` 供展示；
+3. materialize + 探针 kick，端点从 Probation 起步走常规探针节奏。
+
+上限：自动集合达到 `max_chains`（默认 400）时**停止新增**，不淘汰任何已开启链；pending 数量
+在 Admin API 与日志里暴露，由人工决定是否提高上限。
+
+启动恢复：bootstrap 读 `chains:auto`，跳过带人工墓碑的条目，其余与 config pinned 同一路径预热。
+
+### 15.5 配置增量
+
+```toml
+[discovery.auto_enable]
+enabled = true
+min_endpoints = 5              # 静态门槛：去重后公开 https 端点数
+max_chains = 400               # 自动集合上限（达到即停止新增，不淘汰）
+max_candidates = 512           # 候选池上限
+max_endpoints_per_chain = 8    # 每链采样探测的端点数上限
+candidate_interval_seconds = 30
+probe_batch = 32
+probe_concurrency = 8
+promote_after_rounds = 2
+min_active_endpoints = 2
+head_tolerance_blocks = 64
+```
+
+环境变量：`RPCROUTER_AUTO_ENABLE_ENABLED` / `_MIN_ENDPOINTS` / `_MAX_CHAINS`（沿用现有解析约定）。
+`enabled = false` 时整套逻辑不启动，行为回到 W8 现状。
+
+### 15.6 状态存储增量
+
+| key | 类型 | 内容 | 写入时机 |
+|---|---|---|---|
+| `chains:auto` | hash（chainId → JSON） | `{enabledAt, endpoints, activeSeen, head}` | 晋级时同步写 |
+
+`meta.schema_version` bump；旧库无该 key 视为空集合，无需迁移脚本。`export`/`import`/`reset`
+覆盖该 key（`reset` 清空 = 人工操作，允许）。
+
+### 15.7 API 与展示增量
+
+- `/admin/api/chains` 行增 `pinSource`（`config|manual|auto|null`）与 `autoCandidate`
+  （`{rounds, lastQualified, lastError}`，仅候选链有值）。
+- `/admin/api/overview` 增 `autoEnable: {enabled, chains, candidates, pending, capped,
+  lastScanAt, promotionsTotal}`。
+- 公共 API（覆盖 §14.1 的对应描述）：`PublicChainRow.state` 对外只两档，`available`
+  （内部 pinned/hot 且 `active > 0`）与 `unverified`（其余非 disabled 链）；
+  `/api/public/chains` 默认只返回 `available`，带 `q` 搜索或 `scope=all` 时返回全目录
+  （仍排除 disabled）；overview 增 `chains.available`。
+- Dashboard：链表增 pinSource 列与「候选」视图（轮次、上次失败原因）；公共首页默认列已开启链，
+  搜索提示可查全部目录，dormant 命中仍显示 “Available (on demand)”。
+
+### 15.8 可观测性（不依赖 Prometheus）
+
+用户要求自动开启的判定与观察**不依赖 Prometheus**：
+
+- 判定只用进程内探测结果，不读 `/metrics`，不依赖任何外部时序库；
+- 运行状态一律通过 `/admin/api/overview`、`/admin/api/chains` 与 dashboard 呈现，
+  `metrics_enabled = false` 时功能与可观察性都完整；
+- 只补少量**无 chain_id 标签**的全局标量指标（自动开启链数 / 候选数 / 晋级累计 / 探测失败累计），
+  不新增 per-chain 序列，避免基数随链数膨胀。
+
+### 15.9 风险
+
+- 探针负载：8 条 pinned（332 端点）→ 约 200 条链、每链上限 8 端点（约 1300 端点），
+  20s 间隔下约 65 probe/s，加候选探测约 10 probe/s。对单端点仍是分钟级，符合 TOS 约定。
+- 只增不减意味着长期只会变大：靠 `max_chains` 封顶 + 人工减法兜底。
+- 状态存储不可写时晋级暂停，属于预期降级（保证重启不回退）。
