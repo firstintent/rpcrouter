@@ -32,6 +32,20 @@ deny = []
 max_hot_chains = 256
 idle_seconds = 600
 
+# 自动开启：按规则批量常驻开启优质 EVM 主网链（只增不减，减法只有人工 unpin/disable）。
+[discovery.auto_enable]
+enabled = true
+min_endpoints = 5              # 静态门槛：去重后的公开 https 端点数
+max_chains = 400               # 自动集合上限（达到即停止新增，不淘汰已开启链）
+max_candidates = 512           # 候选池上限
+max_endpoints_per_chain = 8    # 每链每轮采样探测的端点数上限
+candidate_interval_seconds = 30
+probe_batch = 32               # 每轮探测的候选链数（指针轮转）
+probe_concurrency = 8          # 候选探测全局并发上限
+promote_after_rounds = 2       # 连续合格轮次达标才晋级
+min_active_endpoints = 2
+head_tolerance_blocks = 64
+
 [upstream]
 request_timeout_ms = 5000
 slow_threshold_ms = 4000

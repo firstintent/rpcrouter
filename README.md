@@ -46,6 +46,7 @@ curl -sS http://127.0.0.1:8545/rpc/1 \
 | `server` | JSON-RPC batch 上限（最大 100） |
 | `chainlist` | 数据源、1 小时刷新、陈旧宽限和磁盘缓存路径 |
 | `discovery` | 动态目录、测试网、deny、热链上限与 idle 降级；关闭时仅服务 pinned 链 |
+| `discovery.auto_enable` | 自动开启优质主网链：静态门槛、候选池与探测预算、晋级轮次、集合上限 |
 | `upstream` | 单次/总超时、重试次数、默认端点 rps 与并发限制 |
 | `probe` | 15–30 秒探针抖动、全局并发和允许块高滞后 |
 | `cache` | 按响应字节加权的容量（默认 512 MiB）和不可变 TTL |
