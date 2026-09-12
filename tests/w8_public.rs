@@ -132,6 +132,7 @@ async fn app(
         config,
         started: std::time::Instant::now(),
         state_runtime: StateRuntimeSnapshot::new("memory", "test", "test-1"),
+        auto_enable: None,
         public_cache: Arc::clone(&public_cache),
     };
     (

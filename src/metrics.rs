@@ -46,6 +46,10 @@ pub struct Metrics {
     catalog_endpoints: IntGauge,
     catalog_records_skipped: IntCounter,
     probe_queue_depth: IntGauge,
+    auto_enable_chains: IntGauge,
+    auto_enable_candidates: IntGauge,
+    auto_enable_promotions: IntCounter,
+    auto_enable_probe_failures: IntCounter,
     probe_in_flight: IntGauge,
     chainlist_last_refresh: IntGauge,
     chainlist_refresh_total: IntCounterVec,
@@ -257,6 +261,23 @@ impl Metrics {
             "rpcrouter_probe_queue_depth",
             "Number of probe tasks waiting in the queue.",
         )?;
+        // 自动开启：全局标量，不带 chain_id 标签（基数不随链数增长）。
+        let auto_enable_chains = IntGauge::new(
+            "rpcrouter_auto_enable_chains",
+            "Number of chains currently auto-enabled.",
+        )?;
+        let auto_enable_candidates = IntGauge::new(
+            "rpcrouter_auto_enable_candidates",
+            "Number of chains in the auto-enable candidate pool.",
+        )?;
+        let auto_enable_promotions = IntCounter::new(
+            "rpcrouter_auto_enable_promotions_total",
+            "Number of chains promoted to auto-enabled.",
+        )?;
+        let auto_enable_probe_failures = IntCounter::new(
+            "rpcrouter_auto_enable_probe_failures_total",
+            "Number of failed candidate endpoint probes.",
+        )?;
         let probe_in_flight = IntGauge::new(
             "rpcrouter_probe_in_flight",
             "Number of probes currently in flight.",
@@ -340,6 +361,10 @@ impl Metrics {
             Box::new(catalog_endpoints.clone()),
             Box::new(catalog_records_skipped.clone()),
             Box::new(probe_queue_depth.clone()),
+            Box::new(auto_enable_chains.clone()),
+            Box::new(auto_enable_candidates.clone()),
+            Box::new(auto_enable_promotions.clone()),
+            Box::new(auto_enable_probe_failures.clone()),
             Box::new(probe_in_flight.clone()),
             Box::new(chainlist_last_refresh.clone()),
             Box::new(chainlist_refresh_total.clone()),
@@ -384,6 +409,10 @@ impl Metrics {
             catalog_endpoints,
             catalog_records_skipped,
             probe_queue_depth,
+            auto_enable_chains,
+            auto_enable_candidates,
+            auto_enable_promotions,
+            auto_enable_probe_failures,
             probe_in_flight,
             chainlist_last_refresh,
             chainlist_refresh_total,
@@ -530,6 +559,23 @@ impl Metrics {
 
     pub fn record_catalog_records_skipped(&self, count: usize) {
         self.catalog_records_skipped.inc_by(count as u64);
+    }
+
+    pub fn set_auto_enable_gauges(&self, chains: u64, candidates: u64) {
+        self.auto_enable_chains.set(chains as i64);
+        self.auto_enable_candidates.set(candidates as i64);
+    }
+
+    pub fn record_auto_enable_promotion(&self) {
+        self.auto_enable_promotions.inc();
+    }
+
+    pub fn record_auto_enable_probe_failures(&self, count: u64) {
+        self.auto_enable_probe_failures.inc_by(count);
+    }
+
+    pub fn auto_enable_promotions_total(&self) -> u64 {
+        self.auto_enable_promotions.get()
     }
 
     pub fn set_probe_queue_depth(&self, depth: u64) {

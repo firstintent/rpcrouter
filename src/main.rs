@@ -149,11 +149,10 @@ async fn main() -> Result<()> {
     spawn_probes(Arc::clone(&probes), Arc::clone(&metrics));
     // 自动开启：恢复持久化集合并预热，然后起后台评估任务（关闭时两者都不做）。
     let auto_enable = if config.discovery.auto_enable.enabled {
-        let manager = Arc::new(AutoEnableManager::new(
-            Arc::clone(&registry),
-            Arc::clone(&store),
-            &config,
-        )?);
+        let manager = Arc::new(
+            AutoEnableManager::new(Arc::clone(&registry), Arc::clone(&store), &config)?
+                .with_metrics(Arc::clone(&metrics)),
+        );
         manager.preheat(&boot.auto_chains).await;
         let task = Arc::clone(&manager);
         supervisor::spawn("auto-enable", Arc::clone(&metrics), move || {
@@ -164,7 +163,6 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let _ = &auto_enable;
     let initial_up = store.health().await;
     metrics.set_state_store_up(initial_up);
     state_runtime.write().await.up = initial_up;

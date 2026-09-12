@@ -2,6 +2,7 @@
 use crate::{
     chainlist::{Catalog, CatalogEndpoint},
     config::Config,
+    metrics::Metrics,
     registry::Registry,
     signals::{ResponseClassification, classify_response},
     state::{AutoChainState, StateStore},
@@ -251,7 +252,8 @@ async fn probe_endpoint(
 }
 
 /// 单条候选链的评估进度（供 Admin API 展示）。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CandidateProgress {
     /// 连续合格轮次。
     pub rounds: u32,
@@ -297,6 +299,8 @@ pub struct AutoEnableManager {
     interval: Duration,
     semaphore: Arc<Semaphore>,
     state: Mutex<ScanState>,
+    /// 可选：只用于导出全局标量，判定逻辑不依赖它（也不依赖 Prometheus 抓取）。
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl AutoEnableManager {
@@ -341,7 +345,13 @@ impl AutoEnableManager {
             semaphore: Arc::new(Semaphore::new(cfg.probe_concurrency.max(1))),
             cfg,
             state: Mutex::new(ScanState::default()),
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// 启动预热：恢复持久化的自动开启集合并 materialize（带人工墓碑的条目跳过）。
@@ -445,6 +455,9 @@ impl AutoEnableManager {
             let Ok((candidate, round)) = joined else {
                 continue;
             };
+            if round.failures > 0 && let Some(metrics) = self.metrics.as_ref() {
+                metrics.record_auto_enable_probe_failures(round.failures as u64);
+            }
             let ready = {
                 let mut state = self.state.lock().await;
                 let entry = state.progress.entry(candidate.chain_id).or_default();
@@ -477,6 +490,9 @@ impl AutoEnableManager {
             if self.promote(&candidate, &round).await {
                 let mut state = self.state.lock().await;
                 state.promotions_total = state.promotions_total.saturating_add(1);
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.record_auto_enable_promotion();
+                }
             } else {
                 pending += 1;
             }
@@ -495,6 +511,12 @@ impl AutoEnableManager {
         state.pending = pending;
         state.capped = capped || self.registry.auto_chain_ids().len() >= self.cfg.max_chains;
         state.last_scan_at = crate::registry::unix_seconds();
+        if let Some(metrics) = self.metrics.as_ref() {
+            metrics.set_auto_enable_gauges(
+                self.registry.auto_chain_ids().len() as u64,
+                state.candidates as u64,
+            );
+        }
     }
 
     /// 晋级：先写状态存储，落盘成功才进内存并 materialize。
@@ -544,6 +566,11 @@ impl AutoEnableManager {
 
     pub async fn candidate_progress(&self, chain_id: u64) -> Option<CandidateProgress> {
         self.state.lock().await.progress.get(&chain_id).cloned()
+    }
+
+    /// 一次性取全部候选进度，避免 Admin 渲染每行都抢锁。
+    pub async fn progress_snapshot(&self) -> HashMap<u64, CandidateProgress> {
+        self.state.lock().await.progress.clone()
     }
 }
 
