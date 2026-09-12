@@ -222,7 +222,7 @@ async fn probe_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chainlist::{Catalog, CatalogChain, CatalogEndpoint};
+    use crate::chainlist::{Catalog, CatalogEndpoint};
     use std::collections::HashMap;
     #[test]
     fn candidate_filters_and_scores() {
