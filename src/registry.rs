@@ -692,7 +692,7 @@ impl Registry {
             entry
                 .value()
                 .pinned
-                .store(self.is_pinned_chain(*entry.key()), Ordering::Relaxed);
+                .store(self.config.chains.contains(entry.key()), Ordering::Relaxed);
             entry.value().disabled.store(false, Ordering::Relaxed);
         }
         for (id, value) in &overrides.chains {
@@ -1275,12 +1275,6 @@ impl Registry {
     }
 
     pub async fn set_auto_pinned(&self, chain_id: u64, enabled: bool) -> bool {
-        if enabled {
-            let ov = self.runtime_chain_override(chain_id);
-            if ov.pinned == Some(false) || ov.disabled == Some(true) {
-                return false;
-            }
-        }
         if enabled {
             self.auto_pinned.insert(chain_id, true);
         } else {
