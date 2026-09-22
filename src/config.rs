@@ -182,13 +182,66 @@ impl Config {
         if let Some(raw) = env_non_empty("RPCROUTER_ADMIN_PUBLIC_SITE") {
             self.admin.public_site = parse_bool(&raw, "RPCROUTER_ADMIN_PUBLIC_SITE")?;
         }
+        if let Some(raw) = env_non_empty("RPCROUTER_FALLBACKS") {
+            for (chain_id, url) in parse_fallback_list(&raw)? {
+                self.assign_fallback(chain_id, url);
+            }
+        }
+        for (key, value) in std::env::vars() {
+            let Some(chain_id) = key.strip_prefix("RPCROUTER_FALLBACK_") else {
+                continue;
+            };
+            if chain_id.is_empty() || !chain_id.chars().all(|character| character.is_ascii_digit())
+            {
+                continue;
+            }
+            let chain_id: u64 = chain_id
+                .parse()
+                .with_context(|| format!("{key} is not a chain id"))?;
+            let url = value.trim();
+            if url.is_empty() {
+                continue;
+            }
+            self.assign_fallback(chain_id, url.to_owned());
+        }
+        self.normalize();
         self.validate()
     }
 
     pub fn from_toml(contents: &str) -> Result<Self> {
-        let config: Self = toml::from_str(contents).context("invalid TOML")?;
+        let mut config: Self = toml::from_str(contents).context("invalid TOML")?;
+        config.normalize();
         config.validate()?;
         Ok(config)
+    }
+
+    /// 空的兜底 URL 视为未配置。密钥放在环境变量里时，空串不能把已有配置清掉。
+    fn normalize(&mut self) {
+        for chain in &mut self.chain_overrides {
+            let trimmed = chain
+                .fallback_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .map(ToOwned::to_owned);
+            chain.fallback_url = trimmed;
+        }
+    }
+
+    fn assign_fallback(&mut self, chain_id: u64, url: String) {
+        if let Some(chain) = self
+            .chain_overrides
+            .iter_mut()
+            .find(|chain| chain.chain_id == chain_id)
+        {
+            chain.fallback_url = Some(url);
+            return;
+        }
+        self.chain_overrides.push(ChainOverride {
+            chain_id,
+            fallback_url: Some(url),
+            ..ChainOverride::default()
+        });
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -296,6 +349,14 @@ impl Config {
         if self.probe.max_concurrency == 0 || self.probe.request_timeout_ms == 0 {
             bail!("probe concurrency and timeout must be greater than zero");
         }
+        if self.probe.archive_enabled && self.probe.archive_interval_seconds == 0 {
+            bail!("probe.archive_interval_seconds must be greater than zero");
+        }
+        for chain in &self.chain_overrides {
+            if let Some(url) = &chain.fallback_url {
+                validate_fallback_url(url)?;
+            }
+        }
         if self.cache.max_bytes == 0 || self.cache.immutable_ttl_seconds < 60 * 60 {
             bail!("cache capacity must be nonzero and immutable TTL must be at least one hour");
         }
@@ -321,6 +382,15 @@ impl Config {
         self.chain_overrides
             .iter()
             .find(|chain| chain.chain_id == chain_id)
+    }
+
+    /// 该链配置的付费兜底 URL。同一 chain id 有多段覆写时，取第一段非空值。
+    pub fn fallback_url(&self, chain_id: u64) -> Option<&str> {
+        self.chain_overrides.iter().find_map(|chain| {
+            (chain.chain_id == chain_id)
+                .then_some(chain.fallback_url.as_deref())
+                .flatten()
+        })
     }
 
     pub fn endpoint_limits(&self, chain_id: u64, url: &str) -> (u32, usize) {
@@ -535,6 +605,8 @@ pub struct ChainOverride {
     pub extra_endpoints: Vec<String>,
     pub disabled_endpoints: Vec<String>,
     pub endpoint_overrides: Vec<EndpointOverride>,
+    /// 付费兜底，只在公共池耗尽后尝试一次。含密钥的 URL 用环境变量注入，不要提交进仓库。
+    pub fallback_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -552,6 +624,27 @@ pub struct ProbeConfig {
     pub max_concurrency: usize,
     pub request_timeout_ms: u64,
     pub max_block_lag: u64,
+    /// 存活探针通过后，按更慢的周期判断端点是否保留区块 1 的状态。
+    #[serde(default = "default_archive_enabled")]
+    pub archive_enabled: bool,
+    /// 同一端点两次归档探测的最小间隔。默认 10 分钟，避免在公共节点上放大历史状态读取。
+    #[serde(default = "default_archive_interval_seconds")]
+    pub archive_interval_seconds: u64,
+    /// 链头低于该高度时不下归档结论：整条链还年轻，全节点也可能仍有创世状态。
+    #[serde(default = "default_archive_min_head")]
+    pub archive_min_head: u64,
+}
+
+fn default_archive_enabled() -> bool {
+    true
+}
+
+fn default_archive_interval_seconds() -> u64 {
+    600
+}
+
+fn default_archive_min_head() -> u64 {
+    100_000
 }
 
 impl Default for ProbeConfig {
@@ -562,8 +655,55 @@ impl Default for ProbeConfig {
             max_concurrency: 32,
             request_timeout_ms: 5_000,
             max_block_lag: 5,
+            archive_enabled: default_archive_enabled(),
+            archive_interval_seconds: default_archive_interval_seconds(),
+            archive_min_head: default_archive_min_head(),
         }
     }
+}
+
+/// `chainId=url` 以逗号分隔。URL 里可以有 `=`，不能有逗号。
+pub fn parse_fallback_list(raw: &str) -> Result<Vec<(u64, String)>> {
+    let mut entries = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((chain_id, url)) = part.split_once('=') else {
+            bail!("RPCROUTER_FALLBACKS entry `{part}` must be chainId=url");
+        };
+        let chain_id: u64 = chain_id.trim().parse().with_context(|| {
+            format!(
+                "RPCROUTER_FALLBACKS chain id `{}` is invalid",
+                chain_id.trim()
+            )
+        })?;
+        let url = url.trim().to_owned();
+        if url.is_empty() {
+            bail!("RPCROUTER_FALLBACKS URL for chain {chain_id} is empty");
+        }
+        entries.push((chain_id, url));
+    }
+    Ok(entries)
+}
+
+fn validate_fallback_url(url: &str) -> Result<()> {
+    if url.chars().any(char::is_whitespace) {
+        bail!("fallback_url must not contain whitespace");
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        bail!("fallback_url must be an http(s) URL");
+    }
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .unwrap_or("");
+    if host.is_empty() {
+        bail!("fallback_url must include a host");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -923,6 +1063,84 @@ mod tests {
                 .expect_err("invalid cache size should fail");
             assert!(error.to_string().contains("RPCROUTER_CACHE_MAX_BYTES"));
         });
+    }
+
+    #[test]
+    fn fallback_url_comes_from_toml_or_env() {
+        let config = Config::from_toml(
+            r#"
+                chains = [137]
+                [[chain_overrides]]
+                chain_id = 137
+                fallback_url = "https://example.quiknode.pro/token/"
+            "#,
+        )
+        .expect("fallback config");
+        assert_eq!(
+            config.fallback_url(137),
+            Some("https://example.quiknode.pro/token/")
+        );
+        assert_eq!(config.fallback_url(1), None);
+
+        let empty = Config::from_toml(
+            r#"
+                chains = [1]
+                [[chain_overrides]]
+                chain_id = 1
+                fallback_url = "  "
+            "#,
+        )
+        .expect("blank fallback is unset");
+        assert_eq!(empty.fallback_url(1), None);
+
+        let error = Config::from_toml(
+            r#"
+                chains = [1]
+                [[chain_overrides]]
+                chain_id = 1
+                fallback_url = "quiknode.example/token"
+            "#,
+        )
+        .expect_err("scheme is required");
+        assert!(error.to_string().contains("fallback_url"));
+
+        assert_eq!(
+            parse_fallback_list("137=https://a.example/x, 1=https://b.example/y=z").unwrap(),
+            vec![
+                (137, "https://a.example/x".to_owned()),
+                (1, "https://b.example/y=z".to_owned()),
+            ]
+        );
+
+        with_env(
+            &[
+                ("RPCROUTER_FALLBACKS", "56=https://bsc.example/from-list"),
+                (
+                    "RPCROUTER_FALLBACK_137",
+                    "https://polygon.quiknode.pro/secret/",
+                ),
+            ],
+            || {
+                let mut config = Config::from_toml(
+                    r#"
+                        chains = [137]
+                        [[chain_overrides]]
+                        chain_id = 137
+                        fallback_url = "https://old.example/token"
+                    "#,
+                )
+                .expect("base config");
+                config.apply_env_overrides().expect("env fallback");
+                assert_eq!(
+                    config.fallback_url(137),
+                    Some("https://polygon.quiknode.pro/secret/")
+                );
+                assert_eq!(
+                    config.fallback_url(56),
+                    Some("https://bsc.example/from-list")
+                );
+            },
+        );
     }
 
     #[test]

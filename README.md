@@ -48,10 +48,10 @@ curl -sS http://127.0.0.1:8545/rpc/1 \
 | `discovery` | 动态目录、测试网、deny、热链上限与 idle 降级；关闭时仅服务 pinned 链 |
 | `discovery.auto_enable` | 自动开启优质主网链：静态门槛、候选池与探测预算、晋级轮次、集合上限 |
 | `upstream` | 单次/总超时、重试次数、默认端点 rps 与并发限制 |
-| `probe` | 15–30 秒探针抖动、全局并发和允许块高滞后 |
+| `probe` | 15–30 秒探针抖动、全局并发、允许块高滞后；归档探测（区块 1 余额 + 近/远区块的内部交易解析，默认 10 分钟一轮） |
 | `cache` | 按响应字节加权的容量（默认 512 MiB）和不可变 TTL |
 | `hedging` | 只读请求第二发延迟、全局占比和健康池门槛 |
-| `chain_overrides` | 每链块时间、确认深度 K、tip TTL、附加/屏蔽端点及端点限额；可用于非 pinned 链 |
+| `chain_overrides` | 每链块时间、确认深度 K、tip TTL、附加/屏蔽端点、端点限额，以及付费兜底 `fallback_url` |
 | `state` | Redis/File/Memory 状态镜像、命名空间、required、flush 周期与健康快照 TTL |
 | `admin` | Admin API 开关、公共主页开关、Bearer token、SPA 静态目录与 CORS 来源 |
 
@@ -65,6 +65,10 @@ curl -sS http://127.0.0.1:8545/rpc/1 \
 `RPCROUTER_STATE_NAMESPACE`、`RPCROUTER_STATE_RESET=1`。默认 Redis 不可达时自动降级为
 内存 + `data/state.json`，不会中断 RPC 流量；`RPCROUTER_STATE_REQUIRED=true` 用于必须持久化的部署。
 管理面可用 `RPCROUTER_ADMIN_TOKEN`、`RPCROUTER_ADMIN_STATIC_DIR` 与 `RPCROUTER_ADMIN_PUBLIC_SITE` 覆写 token、SPA 目录和公共主页开关。
+
+个别链的付费兜底用 `chain_overrides.fallback_url`，或环境变量 `RPCROUTER_FALLBACK_<chainId>` /
+`RPCROUTER_FALLBACKS=137=https://…,1=https://…`（含密钥时用环境变量，不要提交进仓库）。
+公共池还有可用端点时不会打到这个 URL；公共池耗尽后只再试一次。指标和后台展示会隐去 URL 路径。
 
 仓库配置使用偏保守的缓存确认深度。BSC 按 Maxwell 升级后的约 750ms 出块配置；Polygon
 约 2s、Arbitrum 约 250ms，Base、OP 与 Avalanche 约 2s。tip TTL 不超过对应块时间和 2s。

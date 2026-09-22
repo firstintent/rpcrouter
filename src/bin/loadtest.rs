@@ -119,7 +119,9 @@ async fn main() -> Result<()> {
     healthy.reset_request_count();
     let baseline = metrics.chain_snapshot(1);
 
-    let probes = Arc::new(ProbeManager::new(Arc::clone(&registry), &config)?);
+    let probes = Arc::new(
+        ProbeManager::new(Arc::clone(&registry), &config)?.with_metrics(Arc::clone(&metrics)),
+    );
     spawn_probes(probes, Arc::clone(&metrics));
     let timeline = Arc::new(Mutex::new(Vec::new()));
     let started = Instant::now();
@@ -245,9 +247,7 @@ fn load_config(rps: u32) -> Config {
         probe: ProbeConfig {
             min_interval_seconds: 15,
             max_interval_seconds: 15,
-            max_concurrency: 32,
-            request_timeout_ms: 5_000,
-            max_block_lag: 5,
+            ..ProbeConfig::default()
         },
         cache: CacheConfig {
             max_bytes: 128 * 1024 * 1024,

@@ -4,7 +4,7 @@ use std::{
     num::NonZeroU32,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -55,6 +55,51 @@ pub enum PoolKind {
     Active,
     Probation,
     Empty,
+}
+
+/// 归档探测结论。`Unknown` 表示还没判过，或这次探测无法下结论。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ArchiveStatus {
+    Unknown = 0,
+    Yes = 1,
+    No = 2,
+}
+
+impl ArchiveStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Yes => "yes",
+            Self::No => "no",
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Yes,
+            2 => Self::No,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EndpointRole {
+    Pool,
+    Fallback,
+}
+
+/// 日志、指标和后台展示用的 URL。付费兜底的路径里是密钥，只保留 scheme 和 host。
+pub fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<redacted>".to_owned();
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() {
+        return "<redacted>".to_owned();
+    }
+    format!("{scheme}://{host}/<redacted>")
 }
 
 pub struct CandidateSet {
@@ -206,10 +251,22 @@ pub struct Endpoint {
     /// 同一端点同一时刻至多一个在飞探针（防止 kick 与周期调度重复入队）。
     probing: AtomicBool,
     dirty: AtomicBool,
+    role: EndpointRole,
+    archive_status: AtomicU8,
+    archive_latency_ewma_micros: AtomicU64,
+    archive_checked_unix: AtomicU64,
 }
 
 impl Endpoint {
     fn new(url: String, rps: u32, concurrency: usize, now: u64) -> Self {
+        Self::with_role(url, rps, concurrency, now, EndpointRole::Pool)
+    }
+
+    fn fallback(url: String, rps: u32, concurrency: usize, now: u64) -> Self {
+        Self::with_role(url, rps, concurrency, now, EndpointRole::Fallback)
+    }
+
+    fn with_role(url: String, rps: u32, concurrency: usize, now: u64, role: EndpointRole) -> Self {
         let rps = rps.clamp(1, 100);
         let concurrency = concurrency.clamp(1, 64);
         let quota = Quota::per_second(NonZeroU32::new(rps).expect("validated nonzero RPS"))
@@ -229,11 +286,51 @@ impl Endpoint {
             stats: EndpointStats::default(),
             probing: AtomicBool::new(false),
             dirty: AtomicBool::new(true),
+            role,
+            archive_status: AtomicU8::new(ArchiveStatus::Unknown as u8),
+            archive_latency_ewma_micros: AtomicU64::new(0),
+            archive_checked_unix: AtomicU64::new(0),
         }
     }
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    pub fn is_fallback(&self) -> bool {
+        self.role == EndpointRole::Fallback
+    }
+
+    /// 对外展示和指标标签。公共池端点保持原 URL；兜底端点去掉路径里的密钥。
+    pub fn log_label(&self) -> String {
+        if self.is_fallback() {
+            redact_url(&self.url)
+        } else {
+            self.url.clone()
+        }
+    }
+
+    pub fn archive_status(&self) -> ArchiveStatus {
+        ArchiveStatus::from_u8(self.archive_status.load(Ordering::Relaxed))
+    }
+
+    pub fn archive_latency_ewma_micros(&self) -> u64 {
+        self.archive_latency_ewma_micros.load(Ordering::Relaxed)
+    }
+
+    pub fn archive_check_due(&self, now_unix: u64, interval: Duration) -> bool {
+        let checked = self.archive_checked_unix.load(Ordering::Relaxed);
+        checked == 0 || now_unix.saturating_sub(checked) >= interval.as_secs()
+    }
+
+    pub fn record_archive(&self, status: ArchiveStatus, latency: Duration, now_unix: u64) {
+        self.archive_status.store(status as u8, Ordering::Relaxed);
+        update_ewma(&self.archive_latency_ewma_micros, latency);
+        self.archive_checked_unix.store(now_unix, Ordering::Relaxed);
+    }
+
+    pub fn touch_archive_check(&self, now_unix: u64) {
+        self.archive_checked_unix.store(now_unix, Ordering::Relaxed);
     }
 
     pub fn rps(&self) -> u32 {
@@ -498,24 +595,7 @@ impl Endpoint {
     }
 
     fn update_latency(&self, latency: Duration) {
-        let sample = latency.as_micros().min(u128::from(u64::MAX)) as u64;
-        let mut previous = self.latency_ewma_micros.load(Ordering::Relaxed);
-        loop {
-            let updated = if previous == 0 {
-                sample
-            } else {
-                previous.saturating_mul(4).saturating_add(sample) / 5
-            };
-            match self.latency_ewma_micros.compare_exchange_weak(
-                previous,
-                updated,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(actual) => previous = actual,
-            }
-        }
+        update_ewma(&self.latency_ewma_micros, latency);
     }
 
     fn observe_height(&self, height: u64, now: Instant) {
@@ -527,6 +607,22 @@ impl Endpoint {
         lock(&self.height_observation).and_then(|(height, observed_at)| {
             (now.saturating_duration_since(observed_at) <= freshness).then_some(height)
         })
+    }
+}
+
+fn update_ewma(cell: &AtomicU64, latency: Duration) {
+    let sample = latency.as_micros().min(u128::from(u64::MAX)) as u64;
+    let mut previous = cell.load(Ordering::Relaxed);
+    loop {
+        let updated = if previous == 0 {
+            sample
+        } else {
+            previous.saturating_mul(4).saturating_add(sample) / 5
+        };
+        match cell.compare_exchange_weak(previous, updated, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(actual) => previous = actual,
+        }
     }
 }
 
@@ -565,6 +661,8 @@ pub struct ChainState {
     disabled: AtomicBool,
     /// 最后一次入口请求的 Unix 秒时间戳（粗粒度，仅秒值变化时写入）。
     last_ingress: AtomicU64,
+    /// 付费兜底。不进入 `endpoints`，因此不参与 P2C、hedge 和端点计数。
+    fallback: RwLock<Option<Arc<Endpoint>>>,
 }
 
 impl ChainState {
@@ -578,6 +676,7 @@ impl ChainState {
             pinned: AtomicBool::new(pinned),
             disabled: AtomicBool::new(false),
             last_ingress: AtomicU64::new(0),
+            fallback: RwLock::new(None),
         }
     }
 
@@ -855,8 +954,11 @@ impl Registry {
         let denied = self.config.discovery.deny.contains(&chain_id);
         let catalog = self.catalog.read().await;
         let catalog_entry = catalog.as_ref().and_then(|c| c.lookup(chain_id));
+        // 显式配置了付费兜底的链，即使不在目录里也要能承接请求。
+        let has_fallback = self.fallback_configured(chain_id);
         if !denied
-            && ((!self.config.discovery.enabled && !pinned) || (catalog_entry.is_none() && !pinned))
+            && ((!self.config.discovery.enabled && !pinned && !has_fallback)
+                || (catalog_entry.is_none() && !pinned && !has_fallback))
         {
             return None;
         }
@@ -889,8 +991,11 @@ impl Registry {
         let catalog_entry = catalog.as_ref().and_then(|c| c.lookup(chain_id));
 
         // discovery disabled 等价 v1：目录只用于 pinned 链，其他链视为未知。
+        // 显式配置了付费兜底的链，即使不在目录里也要能承接请求。
+        let has_fallback = self.fallback_configured(chain_id);
         if !denied
-            && ((!self.config.discovery.enabled && !pinned) || (catalog_entry.is_none() && !pinned))
+            && ((!self.config.discovery.enabled && !pinned && !has_fallback)
+                || (catalog_entry.is_none() && !pinned && !has_fallback))
         {
             return None;
         }
@@ -962,7 +1067,10 @@ impl Registry {
         let mut seen = HashSet::new();
         let mut endpoints = Vec::new();
         for url in desired_urls {
-            if disabled.contains(url.as_str()) || !seen.insert(url.clone()) {
+            if self.is_fallback_url(chain_id, &url)
+                || disabled.contains(url.as_str())
+                || !seen.insert(url.clone())
+            {
                 continue;
             }
             let (mut rps, mut concurrency) = self.config.endpoint_limits(chain_id, &url);
@@ -996,6 +1104,7 @@ impl Registry {
         {
             state.disabled.store(disabled, Ordering::Relaxed);
         }
+        self.install_fallback(&state, now).await;
 
         // 插入 DashMap。
         self.chains.insert(chain_id, Arc::clone(&state));
@@ -1133,7 +1242,8 @@ impl Registry {
         let mut present = HashSet::new();
         let mut merged = Vec::new();
         for url in desired {
-            if disabled.contains(url.as_str())
+            if self.is_fallback_url(state.chain_id, &url)
+                || disabled.contains(url.as_str())
                 || rejected.contains(&url)
                 || !present.insert(url.clone())
             {
@@ -1188,6 +1298,7 @@ impl Registry {
         for endpoint in previous {
             let age = now.saturating_sub(endpoint.last_seen.load(Ordering::Relaxed));
             if !present.contains(endpoint.url())
+                && !self.is_fallback_url(state.chain_id, endpoint.url())
                 && !disabled.contains(endpoint.url())
                 && !rejected.contains(endpoint.url())
                 && age < self.config.chainlist.stale_grace_seconds
@@ -1205,6 +1316,27 @@ impl Registry {
                 endpoint.restore_health(&snapshot);
             }
         }
+        self.install_fallback(state, now).await;
+    }
+
+    fn is_fallback_url(&self, chain_id: u64, url: &str) -> bool {
+        self.config.fallback_url(chain_id) == Some(url)
+    }
+
+    async fn install_fallback(&self, state: &ChainState, now: u64) {
+        let Some(url) = self.config.fallback_url(state.chain_id).map(str::to_owned) else {
+            *state.fallback.write().await = None;
+            return;
+        };
+        let mut slot = state.fallback.write().await;
+        if let Some(existing) = slot.as_ref()
+            && existing.url() == url
+        {
+            existing.last_seen.store(now, Ordering::Relaxed);
+            return;
+        }
+        let (rps, concurrency) = self.config.endpoint_limits(state.chain_id, &url);
+        *slot = Some(Arc::new(Endpoint::fallback(url, rps, concurrency, now)));
     }
 
     // ── 生命周期控制 ──
@@ -1234,8 +1366,9 @@ impl Registry {
         {
             return false;
         }
-        // 丢弃端点运行态。
+        // 丢弃端点运行态。兜底端点跟着链一起卸下，下次激活再按配置装上。
         *state.endpoints.write().await = Vec::new();
+        *state.fallback.write().await = None;
         match reason {
             "idle" => self.chain_demotions_idle.fetch_add(1, Ordering::Relaxed),
             "lru" => self.chain_demotions_lru.fetch_add(1, Ordering::Relaxed),
@@ -1584,6 +1717,31 @@ impl Registry {
         state.endpoints.read().await.clone()
     }
 
+    /// 存活探针的目标：公共池，加上单独挂着的付费兜底。
+    pub async fn probe_targets(&self, chain_id: u64) -> Vec<Arc<Endpoint>> {
+        let mut targets = self.all_endpoints(chain_id).await;
+        if let Some(fallback) = self.fallback_endpoint(chain_id).await
+            && targets
+                .iter()
+                .all(|endpoint| endpoint.url() != fallback.url())
+        {
+            targets.push(fallback);
+        }
+        targets
+    }
+
+    pub fn fallback_configured(&self, chain_id: u64) -> bool {
+        self.config.fallback_url(chain_id).is_some()
+    }
+
+    pub fn configured_fallback_url(&self, chain_id: u64) -> Option<&str> {
+        self.config.fallback_url(chain_id)
+    }
+
+    pub async fn fallback_endpoint(&self, chain_id: u64) -> Option<Arc<Endpoint>> {
+        self.chain(chain_id)?.fallback.read().await.clone()
+    }
+
     /// 端点数量（materialized 链）。
     pub async fn endpoint_count(&self, chain_id: u64) -> usize {
         let Some(state) = self.chain(chain_id) else {
@@ -1641,25 +1799,28 @@ impl Registry {
             let mut endpoints = state.endpoints.write().await;
             if value.disabled == Some(true) {
                 endpoints.retain(|e| e.url() != value.url);
-            } else if let Some(existing) = endpoints.iter_mut().find(|e| e.url() == value.url) {
-                if value.rps.is_some() || value.concurrency.is_some() {
+            } else if !self.is_fallback_url(chain_id, &value.url) {
+                // 兜底 URL 只走 fallback 槽，不能被运行时覆写塞回公共池。
+                if let Some(existing) = endpoints.iter_mut().find(|e| e.url() == value.url) {
+                    if value.rps.is_some() || value.concurrency.is_some() {
+                        let (rps, concurrency) = self.config.endpoint_limits(chain_id, &value.url);
+                        let replacement = Arc::new(Endpoint::new(
+                            value.url.clone(),
+                            value.rps.unwrap_or(rps),
+                            value.concurrency.unwrap_or(concurrency),
+                            unix_seconds(),
+                        ));
+                        *existing = replacement;
+                    }
+                } else {
                     let (rps, concurrency) = self.config.endpoint_limits(chain_id, &value.url);
-                    let replacement = Arc::new(Endpoint::new(
+                    endpoints.push(Arc::new(Endpoint::new(
                         value.url.clone(),
                         value.rps.unwrap_or(rps),
                         value.concurrency.unwrap_or(concurrency),
                         unix_seconds(),
-                    ));
-                    *existing = replacement;
+                    )));
                 }
-            } else {
-                let (rps, concurrency) = self.config.endpoint_limits(chain_id, &value.url);
-                endpoints.push(Arc::new(Endpoint::new(
-                    value.url.clone(),
-                    value.rps.unwrap_or(rps),
-                    value.concurrency.unwrap_or(concurrency),
-                    unix_seconds(),
-                )));
             }
         }
         true
@@ -1669,6 +1830,9 @@ impl Registry {
         let Some(state) = self.chain(chain_id) else {
             return false;
         };
+        if self.is_fallback_url(chain_id, &url) {
+            return false;
+        }
         let (rps, concurrency) = self.config.endpoint_limits(chain_id, &url);
         let mut endpoints = state.endpoints.write().await;
         if endpoints.iter().any(|e| e.url() == url) {
@@ -1731,6 +1895,16 @@ impl Registry {
         let Some(state) = self.chain(chain_id) else {
             return;
         };
+        // 兜底节点不参与公共头高，也不因落后被摘除。它只在公共池耗尽后用一次。
+        if endpoint.is_fallback() {
+            let head = state.head.load(Ordering::Relaxed);
+            if head == 0 {
+                state.head.store(height, Ordering::Relaxed);
+            }
+            let head = state.head.load(Ordering::Relaxed);
+            endpoint.lag.store(head.abs_diff(height), Ordering::Relaxed);
+            return;
+        }
         let freshness =
             Duration::from_secs(self.config.probe.max_interval_seconds.saturating_mul(2));
         let endpoints = state.endpoints.read().await.clone();
@@ -1930,6 +2104,33 @@ impl Registry {
             dormant,
             disabled,
         }
+    }
+
+    /// 每个已物化链上，端点按归档结论计数：`[yes, no, unknown]`。含付费兜底。
+    pub async fn archive_status_counts(&self) -> HashMap<u64, [u64; 3]> {
+        let states: Vec<_> = self
+            .chains
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect();
+        let mut counts = HashMap::new();
+        for state in states {
+            let mut tally = [0u64; 3];
+            let endpoints = state.endpoints.read().await.clone();
+            let fallback = state.fallback.read().await.clone();
+            for endpoint in endpoints.iter().chain(fallback.iter()) {
+                let index = match endpoint.archive_status() {
+                    ArchiveStatus::Yes => 0,
+                    ArchiveStatus::No => 1,
+                    ArchiveStatus::Unknown => 2,
+                };
+                tally[index] += 1;
+            }
+            if tally.iter().any(|count| *count > 0) {
+                counts.insert(state.chain_id, tally);
+            }
+        }
+        counts
     }
 
     pub async fn endpoint_metric_snapshots(&self) -> Vec<EndpointMetricSnapshot> {

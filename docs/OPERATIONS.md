@@ -45,6 +45,14 @@ Grafana 默认登录：`admin / admin`（compose 内 `GF_SECURITY_ADMIN_PASSWORD
 | `rpcrouter_request_latency_seconds` | Histogram | `chain_id` | 端到端请求延迟（p50/p99 用 `histogram_quantile`） |
 | `rpcrouter_failover_depth` | Histogram | `chain_id` | 完成前失败上游尝试次数 |
 | `rpcrouter_hedge_attempts_total` | Counter | `chain_id` | 二次 hedge 请求数 |
+| `rpcrouter_fallback_attempts_total` | Counter | `chain_id` | 公共池失败后的付费兜底尝试次数。标签不含 URL |
+| `rpcrouter_fallback_successes_total` | Counter | `chain_id` | 付费兜底返回了可用响应的次数 |
+| `rpcrouter_fallback_failures_total` | Counter | `chain_id` | 付费兜底尝试失败 |
+| `rpcrouter_fallback_skipped_total` | Counter | `chain_id,reason` | 配了兜底但没发出。reason ∈ `deadline`/`unavailable`/`cooling`/`no_token` |
+| `rpcrouter_fallback_latency_seconds` | Histogram | `chain_id` | 兜底那一次的耗时 |
+| `rpcrouter_endpoints_by_archive` | Gauge | `chain_id,status` | 已物化端点的归档结论。status ∈ `yes`/`no`/`unknown`。含付费兜底，不含 URL |
+| `rpcrouter_archive_probes_total` | Counter | `chain_id,result` | 归档探测轮次。result ∈ `yes`/`full_node`/`no`/`unknown`。`full_node` 是近处能解析内部交易、远处被裁掉 |
+| `rpcrouter_archive_probe_latency_seconds` | Histogram | `chain_id` | 作出归档结论的那一次历史读取耗时。不进用户请求延迟 |
 | `rpcrouter_hedge_ratio` | Gauge | `chain_id` | hedge 占比 = hedges/upstream |
 | `rpcrouter_endpoint_requests_total` | Counter | `chain_id,endpoint` | 端点全部请求（含健康探针） |
 | `rpcrouter_endpoint_rate_limited_total` | Counter | `chain_id,endpoint` | 端点收到的限频响应 |

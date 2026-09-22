@@ -33,6 +33,15 @@ pub struct Metrics {
     failover_depth: HistogramVec,
     hedge_attempts: IntCounterVec,
     hedge_ratio: GaugeVec,
+    fallback_attempts: IntCounterVec,
+    fallback_successes: IntCounterVec,
+    fallback_failures: IntCounterVec,
+    fallback_skipped: IntCounterVec,
+    fallback_latency: HistogramVec,
+    endpoints_by_archive: IntGaugeVec,
+    known_archive_chains: Mutex<HashSet<String>>,
+    archive_probes: IntCounterVec,
+    archive_probe_latency: HistogramVec,
     endpoint_requests: IntCounterVec,
     endpoint_rate_limited: IntCounterVec,
     endpoint_cooling_events: IntCounterVec,
@@ -204,6 +213,68 @@ impl Metrics {
             ),
             &["chain_id"],
         )?;
+        let fallback_attempts = IntCounterVec::new(
+            Opts::new(
+                "rpcrouter_fallback_attempts_total",
+                "Last-resort paid endpoint attempts after the public pool failed.",
+            ),
+            &["chain_id"],
+        )?;
+        let fallback_successes = IntCounterVec::new(
+            Opts::new(
+                "rpcrouter_fallback_successes_total",
+                "Last-resort paid endpoint attempts that returned a response.",
+            ),
+            &["chain_id"],
+        )?;
+        let fallback_failures = IntCounterVec::new(
+            Opts::new(
+                "rpcrouter_fallback_failures_total",
+                "Last-resort paid endpoint attempts that failed.",
+            ),
+            &["chain_id"],
+        )?;
+        let fallback_skipped = IntCounterVec::new(
+            Opts::new(
+                "rpcrouter_fallback_skipped_total",
+                "Configured paid fallback was not called.",
+            ),
+            &["chain_id", "reason"],
+        )?;
+        let latency_buckets = vec![
+            0.000_1, 0.000_25, 0.000_5, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+            1.0, 2.5, 5.0, 15.0,
+        ];
+        let fallback_latency = HistogramVec::new(
+            HistogramOpts::new(
+                "rpcrouter_fallback_latency_seconds",
+                "Latency of a paid fallback attempt.",
+            )
+            .buckets(latency_buckets.clone()),
+            &["chain_id"],
+        )?;
+        let endpoints_by_archive = IntGaugeVec::new(
+            Opts::new(
+                "rpcrouter_endpoints_by_archive",
+                "Materialized endpoints by archive classification.",
+            ),
+            &["chain_id", "status"],
+        )?;
+        let archive_probes = IntCounterVec::new(
+            Opts::new(
+                "rpcrouter_archive_probes_total",
+                "Archive probe rounds by result.",
+            ),
+            &["chain_id", "result"],
+        )?;
+        let archive_probe_latency = HistogramVec::new(
+            HistogramOpts::new(
+                "rpcrouter_archive_probe_latency_seconds",
+                "Latency of the historical read that decided an archive probe.",
+            )
+            .buckets(latency_buckets),
+            &["chain_id"],
+        )?;
         let endpoint_requests = IntCounterVec::new(
             Opts::new(
                 "rpcrouter_endpoint_requests_total",
@@ -351,6 +422,14 @@ impl Metrics {
             Box::new(failover_depth.clone()),
             Box::new(hedge_attempts.clone()),
             Box::new(hedge_ratio.clone()),
+            Box::new(fallback_attempts.clone()),
+            Box::new(fallback_successes.clone()),
+            Box::new(fallback_failures.clone()),
+            Box::new(fallback_skipped.clone()),
+            Box::new(fallback_latency.clone()),
+            Box::new(endpoints_by_archive.clone()),
+            Box::new(archive_probes.clone()),
+            Box::new(archive_probe_latency.clone()),
             Box::new(endpoint_requests.clone()),
             Box::new(endpoint_rate_limited.clone()),
             Box::new(endpoint_cooling_events.clone()),
@@ -397,6 +476,15 @@ impl Metrics {
             failover_depth,
             hedge_attempts,
             hedge_ratio,
+            fallback_attempts,
+            fallback_successes,
+            fallback_failures,
+            fallback_skipped,
+            fallback_latency,
+            endpoints_by_archive,
+            known_archive_chains: Mutex::new(HashSet::new()),
+            archive_probes,
+            archive_probe_latency,
             endpoint_requests,
             endpoint_rate_limited,
             endpoint_cooling_events,
@@ -477,6 +565,48 @@ impl Metrics {
         let totals = self.hedge_totals(chain_id);
         totals.upstream.fetch_add(1, Ordering::Relaxed);
         self.update_hedge_ratio(&chain, &totals);
+    }
+
+    pub fn record_fallback_attempt(&self, chain_id: u64) {
+        self.fallback_attempts
+            .with_label_values(&[&chain_id.to_string()])
+            .inc();
+    }
+
+    pub fn record_fallback_success(&self, chain_id: u64) {
+        self.fallback_successes
+            .with_label_values(&[&chain_id.to_string()])
+            .inc();
+    }
+
+    pub fn record_fallback_failure(&self, chain_id: u64) {
+        self.fallback_failures
+            .with_label_values(&[&chain_id.to_string()])
+            .inc();
+    }
+
+    pub fn record_fallback_skipped(&self, chain_id: u64, reason: &str) {
+        self.fallback_skipped
+            .with_label_values(&[&chain_id.to_string(), reason])
+            .inc();
+    }
+
+    pub fn record_fallback_latency(&self, chain_id: u64, latency: Duration) {
+        self.fallback_latency
+            .with_label_values(&[&chain_id.to_string()])
+            .observe(latency.as_secs_f64());
+    }
+
+    pub fn record_archive_probe(&self, chain_id: u64, result: &str) {
+        self.archive_probes
+            .with_label_values(&[&chain_id.to_string(), result])
+            .inc();
+    }
+
+    pub fn record_archive_probe_latency(&self, chain_id: u64, latency: Duration) {
+        self.archive_probe_latency
+            .with_label_values(&[&chain_id.to_string()])
+            .observe(latency.as_secs_f64());
     }
 
     pub fn record_hedge(&self, chain_id: u64) {
@@ -697,6 +827,7 @@ impl Metrics {
 
     pub async fn encode(&self, rpc_registry: &Registry) -> prometheus::Result<String> {
         self.sync_endpoints(rpc_registry).await;
+        self.sync_archive_gauges(rpc_registry).await;
         self.sync_v2_gauges(rpc_registry).await;
         let families = self.registry.gather();
         let mut buffer = Vec::new();
@@ -801,6 +932,28 @@ impl Metrics {
         }
         *known = current;
     }
+
+    async fn sync_archive_gauges(&self, rpc_registry: &Registry) {
+        let counts = rpc_registry.archive_status_counts().await;
+        let mut known = lock(&self.known_archive_chains);
+        let current: HashSet<String> = counts.keys().map(u64::to_string).collect();
+        for chain in known.difference(&current) {
+            for status in ["yes", "no", "unknown"] {
+                let _ = self
+                    .endpoints_by_archive
+                    .remove_label_values(&[chain, status]);
+            }
+        }
+        for (chain_id, tally) in counts {
+            let chain = chain_id.to_string();
+            for (status, count) in [("yes", tally[0]), ("no", tally[1]), ("unknown", tally[2])] {
+                self.endpoints_by_archive
+                    .with_label_values(&[&chain, status])
+                    .set(i64::try_from(count).unwrap_or(i64::MAX));
+            }
+        }
+        *known = current;
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -850,6 +1003,68 @@ mod tests {
         assert!(encoded.contains("endpoint=\"http://upstream\""));
         assert!(encoded.contains("rpcrouter_chain_pinned{chain_id=\"1\"} 1"));
         assert!(encoded.contains("rpcrouter_catalog_records_skipped_total 1"));
+        assert!(
+            encoded.contains("rpcrouter_endpoints_by_archive{chain_id=\"1\",status=\"unknown\"} 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_and_fallback_metrics_keep_chain_id() {
+        use std::time::Duration;
+
+        use crate::registry::ArchiveStatus;
+
+        let config = Config {
+            chains: vec![137],
+            discovery: DiscoveryConfig {
+                enabled: false,
+                ..DiscoveryConfig::default()
+            },
+            ..Config::default()
+        };
+        let rpc_registry = Arc::new(Registry::new(&config));
+        rpc_registry
+            .apply_snapshot(&ChainlistSnapshot {
+                chains: vec![ChainEndpoints {
+                    chain_id: 137,
+                    name: "Polygon".to_owned(),
+                    endpoints: vec!["http://upstream".to_owned()],
+                }],
+            })
+            .await;
+        let endpoint = rpc_registry
+            .endpoint(137, "http://upstream")
+            .await
+            .expect("endpoint");
+        endpoint.record_archive(ArchiveStatus::No, Duration::from_millis(20), 1);
+        let metrics = Metrics::new().expect("metrics");
+        metrics.record_archive_probe(137, "full_node");
+        metrics.record_archive_probe_latency(137, Duration::from_millis(40));
+        metrics.record_fallback_failure(137);
+        metrics.record_fallback_skipped(137, "cooling");
+        metrics.record_fallback_latency(137, Duration::from_millis(12));
+        let encoded = metrics.encode(&rpc_registry).await.expect("encode");
+        assert!(
+            encoded.contains(
+                "rpcrouter_archive_probes_total{chain_id=\"137\",result=\"full_node\"} 1"
+            )
+        );
+        assert!(
+            encoded.contains("rpcrouter_archive_probe_latency_seconds_count{chain_id=\"137\"} 1")
+        );
+        assert!(encoded.contains("rpcrouter_fallback_failures_total{chain_id=\"137\"} 1"));
+        assert!(
+            encoded.contains(
+                "rpcrouter_fallback_skipped_total{chain_id=\"137\",reason=\"cooling\"} 1"
+            )
+        );
+        assert!(encoded.contains("rpcrouter_fallback_latency_seconds_count{chain_id=\"137\"} 1"));
+        assert!(
+            encoded.contains("rpcrouter_endpoints_by_archive{chain_id=\"137\",status=\"no\"} 1")
+        );
+        assert!(
+            encoded.contains("rpcrouter_endpoints_by_archive{chain_id=\"137\",status=\"yes\"} 0")
+        );
     }
 
     #[tokio::test]

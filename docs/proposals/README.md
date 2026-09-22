@@ -31,6 +31,7 @@
 
 | 日期 | 提案 | 状态 | 关联 |
 |---|---|---|---|
+| 2026-09-22 | [归档探测与付费兜底](2026-09-22-archive-probe-quicknode-fallback/) | 已实现 | DESIGN-v2 §16 |
 | 2026-09-12 | [自动开启优质 EVM 链](2026-09-12-auto-enable-chains/) | 已交付 | DESIGN-v2 §15 / TASKS-v2 W9 |
 | 2026-08-26 | [公共只读主页](2026-08-26-public-site/) | 已交付 | DESIGN-v2 §14 / TASKS-v2 W8 |
 | 2026-08-25 | [动态全链目录 + 状态控制 Dashboard](2026-08-25-dynamic-chains-dashboard/) | 已交付 | DESIGN-v2 / TASKS-v2 W5–W7 |

@@ -28,7 +28,7 @@ use crate::{
     forward::Forwarder,
     metrics::Metrics,
     probe::ProbeManager,
-    registry::{EndpointState, Registry},
+    registry::{Endpoint, EndpointState, Registry},
     state::{
         ChainOverrideState, EndpointOverrideState, Overrides, StateExport, StateRuntimeSnapshot,
         StateStore, endpoint_key,
@@ -121,12 +121,28 @@ pub struct EndpointRow {
     pub strikes: u32,
     pub cooling_until_unix: Option<u64>,
     pub latency_ewma_ms: f64,
+    /// `yes` / `no` / `unknown`。历史状态探测的结论，不是健康状态。
+    pub archive: String,
+    pub archive_latency_ewma_ms: f64,
     pub lag: u64,
     pub rps: u32,
     pub concurrency: usize,
     pub disabled: bool,
     pub source: String,
     pub last_fault: Option<String>,
+    pub stats: crate::registry::EndpointStatsSnapshot,
+}
+
+/// 付费兜底的展示行。`url` 只含 host，路径里的密钥已去掉。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FallbackRow {
+    pub url: String,
+    pub state: String,
+    pub latency_ewma_ms: f64,
+    pub archive: String,
+    pub archive_latency_ewma_ms: f64,
+    pub strikes: u32,
     pub stats: crate::registry::EndpointStatsSnapshot,
 }
 
@@ -159,6 +175,9 @@ pub struct ChainRow {
     pub settings: Value,
     #[serde(rename = "endpointRows", skip_serializing_if = "Option::is_none")]
     pub endpoint_rows: Option<Vec<EndpointRow>>,
+    /// 只在链详情里返回。公共接口使用另一套结构，不会带上这个字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackRow>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1006,6 +1025,13 @@ async fn endpoint_action(
         );
     }
     if action == "add" {
+        if s.registry.configured_fallback_url(id) == Some(body.url.as_str()) {
+            return err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "url is reserved as the paid fallback",
+            );
+        }
         if !s.registry.chain_in_catalog(id).await {
             return err(StatusCode::NOT_FOUND, "unknown_chain", "unknown chain");
         }
@@ -1021,6 +1047,12 @@ async fn endpoint_action(
         s.registry.set_endpoint_override(id, value).await;
         audit(&s, "endpoint.add", &body.url).await;
         return Json(json!({"url":body.url,"state":"probation"})).into_response();
+    }
+    if action == "probe"
+        && let Some(fallback) = s.registry.fallback_endpoint(id).await
+        && fallback.url() == body.url
+    {
+        return probe_response(&s, id, fallback).await;
     }
     if !s.registry.endpoint_known(id, &body.url).await {
         return err(StatusCode::NOT_FOUND, "not_found", "endpoint not found");
@@ -1151,28 +1183,7 @@ async fn endpoint_action(
             };
             let _ = s.registry.remove_runtime_endpoint(id, &body.url).await;
         }
-        "probe" => {
-            let Some(probe) = &s.probe else {
-                return err(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "not_found",
-                    "probe manager unavailable",
-                );
-            };
-            let outcome = probe.probe_endpoint(id, endpoint).await;
-            audit(&s, "endpoint.probe", &body.url).await;
-            let outcome = match outcome {
-                crate::probe::ProbeOutcome::Passed => json!({"state":"passed"}),
-                crate::probe::ProbeOutcome::Skipped => json!({"state":"skipped"}),
-                crate::probe::ProbeOutcome::Failed(kind) => {
-                    json!({"state":"failed","fault":format!("{kind:?}").to_ascii_lowercase()})
-                }
-                crate::probe::ProbeOutcome::RemovedWrongChain { actual } => {
-                    json!({"state":"removedWrongChain","actualChainId":actual})
-                }
-            };
-            return Json(json!({"outcome":outcome})).into_response();
-        }
+        "probe" => return probe_response(&s, id, endpoint).await,
         _ => {
             return err(
                 StatusCode::NOT_FOUND,
@@ -1330,6 +1341,35 @@ fn content_type(path: &std::path::Path) -> &'static str {
     }
 }
 
+async fn probe_response(s: &AdminState, id: u64, endpoint: Arc<Endpoint>) -> Response {
+    let Some(probe) = &s.probe else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not_found",
+            "probe manager unavailable",
+        );
+    };
+    let outcome = probe.probe_endpoint(id, Arc::clone(&endpoint)).await;
+    // 兜底 URL 的路径是密钥，审计里只留 host。
+    audit(s, "endpoint.probe", &endpoint.log_label()).await;
+    let outcome = match outcome {
+        crate::probe::ProbeOutcome::Passed => json!({
+            "state": "passed",
+            "latencyEwmaMs": endpoint.latency_ewma_micros() as f64 / 1000.0,
+            "archive": endpoint.archive_status().as_str(),
+            "archiveLatencyEwmaMs": endpoint.archive_latency_ewma_micros() as f64 / 1000.0
+        }),
+        crate::probe::ProbeOutcome::Skipped => json!({"state":"skipped"}),
+        crate::probe::ProbeOutcome::Failed(kind) => {
+            json!({"state":"failed","fault":format!("{kind:?}").to_ascii_lowercase()})
+        }
+        crate::probe::ProbeOutcome::RemovedWrongChain { actual } => {
+            json!({"state":"removedWrongChain","actualChainId":actual})
+        }
+    };
+    Json(json!({"outcome":outcome})).into_response()
+}
+
 async fn audit(s: &AdminState, what: &str, target: &str) {
     if let Err(e) = s.store.append_audit(what, target).await {
         warn!(error=%e,what,target,"admin audit append failed")
@@ -1429,7 +1469,12 @@ async fn build_rows_with_metrics(
         } else {
             None
         };
-        rows.push(ChainRow{chain_id:id,name:c.map_or_else(||format!("Chain {id}"),|x|x.name.clone()),short_name:c.and_then(|x|x.short_name.clone()),is_testnet:c.is_some_and(|x|x.is_testnet),status:c.and_then(|x|x.status.clone()),state:state.clone(),pinned:state=="pinned",disabled:state=="disabled",pin_source:s.registry.pin_source(id).map(str::to_string),auto_candidate:candidates.get(&id).cloned(),catalog_endpoints:c.map_or(0,|x|x.endpoints.len()),endpoints:summary.map_or(0,|x|x.endpoints),active:summary.map_or(0,|x|x.active),cooling:summary.map_or(0,|x|x.cooling),probation:summary.map_or(0,|x|x.probation),head:summary.map_or(0,|x|x.head),last_ingress_unix:s.registry.chain_last_ingress(id),ingress_total:metrics.ingress,cache_hits_total:metrics.cache_hits,cache_lookups_total:metrics.cache_lookups,upstream_total:metrics.upstream,user_visible_errors_total:metrics.user_visible_errors,settings:json!({"blockTimeMs":settings.0,"confirmationDepth":settings.1,"tipTtlMs":settings.2,"maxBlockLag":settings.3,"source":settings.4}),endpoint_rows});
+        let fallback = if only.is_some() {
+            build_fallback_row(s, id).await
+        } else {
+            None
+        };
+        rows.push(ChainRow{chain_id:id,name:c.map_or_else(||format!("Chain {id}"),|x|x.name.clone()),short_name:c.and_then(|x|x.short_name.clone()),is_testnet:c.is_some_and(|x|x.is_testnet),status:c.and_then(|x|x.status.clone()),state:state.clone(),pinned:state=="pinned",disabled:state=="disabled",pin_source:s.registry.pin_source(id).map(str::to_string),auto_candidate:candidates.get(&id).cloned(),catalog_endpoints:c.map_or(0,|x|x.endpoints.len()),endpoints:summary.map_or(0,|x|x.endpoints),active:summary.map_or(0,|x|x.active),cooling:summary.map_or(0,|x|x.cooling),probation:summary.map_or(0,|x|x.probation),head:summary.map_or(0,|x|x.head),last_ingress_unix:s.registry.chain_last_ingress(id),ingress_total:metrics.ingress,cache_hits_total:metrics.cache_hits,cache_lookups_total:metrics.cache_lookups,upstream_total:metrics.upstream,user_visible_errors_total:metrics.user_visible_errors,settings:json!({"blockTimeMs":settings.0,"confirmationDepth":settings.1,"tipTtlMs":settings.2,"maxBlockLag":settings.3,"source":settings.4}),endpoint_rows,fallback});
     }
     rows
 }
@@ -1461,7 +1506,6 @@ async fn build_endpoint_rows(
                 .find(|x| x.url == e.url())
                 .and_then(|x| x.tracking.clone())
         });
-        let h = e.health_snapshot(id);
         out.push(EndpointRow {
             url: e.url().to_owned(),
             tracking,
@@ -1469,6 +1513,8 @@ async fn build_endpoint_rows(
             strikes,
             cooling_until_unix: cooling,
             latency_ewma_ms: e.latency_ewma_micros() as f64 / 1000.0,
+            archive: e.archive_status().as_str().to_owned(),
+            archive_latency_ewma_ms: e.archive_latency_ewma_micros() as f64 / 1000.0,
             lag: e.lag(),
             rps: e.rps(),
             concurrency: e.concurrency(),
@@ -1481,9 +1527,37 @@ async fn build_endpoint_rows(
             last_fault: None,
             stats: e.stats(),
         });
-        let _ = h;
     }
     out
+}
+
+async fn build_fallback_row(s: &AdminState, id: u64) -> Option<FallbackRow> {
+    if let Some(endpoint) = s.registry.fallback_endpoint(id).await {
+        let (state, strikes) = match endpoint.state(Instant::now().into()) {
+            EndpointState::Active => ("active".to_owned(), 0),
+            EndpointState::Probation { passes } => ("probation".to_owned(), u32::from(passes)),
+            EndpointState::Cooling { strikes, .. } => ("cooling".to_owned(), strikes),
+        };
+        return Some(FallbackRow {
+            url: endpoint.log_label(),
+            state,
+            latency_ewma_ms: endpoint.latency_ewma_micros() as f64 / 1000.0,
+            archive: endpoint.archive_status().as_str().to_owned(),
+            archive_latency_ewma_ms: endpoint.archive_latency_ewma_micros() as f64 / 1000.0,
+            strikes,
+            stats: endpoint.stats(),
+        });
+    }
+    let url = s.registry.configured_fallback_url(id)?;
+    Some(FallbackRow {
+        url: crate::registry::redact_url(url),
+        state: "configured".to_owned(),
+        latency_ewma_ms: 0.0,
+        archive: "unknown".to_owned(),
+        archive_latency_ewma_ms: 0.0,
+        strikes: 0,
+        stats: crate::registry::EndpointStatsSnapshot::default(),
+    })
 }
 
 #[cfg(test)]
@@ -1523,6 +1597,7 @@ mod tests {
             user_visible_errors_total: 0,
             settings: Value::Null,
             endpoint_rows: None,
+            fallback: None,
         }
     }
 

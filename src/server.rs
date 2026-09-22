@@ -215,9 +215,9 @@ async fn rpc(Path(chain_id): Path<u64>, State(state): State<AppState>, body: Byt
             ),
         );
     }
-    // 0 端点链 → 503。
+    // 0 端点链 → 503。配了付费兜底时仍放行，由转发层在公共池为空后试一次。
     let endpoint_count = state.registry.endpoint_count(chain_id).await;
-    if endpoint_count == 0 {
+    if endpoint_count == 0 && !state.registry.fallback_configured(chain_id) {
         state.metrics.record_ingress_rejected("no_endpoints");
         return ingress_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -336,7 +336,7 @@ mod tests {
 
     use crate::{
         chainlist::{Catalog, CatalogChain, CatalogEndpoint, ChainEndpoints, ChainlistSnapshot},
-        config::{Config, DiscoveryConfig, UpstreamConfig},
+        config::{ChainOverride, Config, DiscoveryConfig, UpstreamConfig},
     };
 
     use super::*;
@@ -732,6 +732,73 @@ mod tests {
                 .unwrap()
                 .contains("no public endpoints")
         );
+    }
+
+    #[tokio::test]
+    async fn empty_public_pool_uses_configured_fallback() {
+        #[derive(Clone)]
+        struct Hits(Arc<AtomicUsize>);
+        async fn ok_rpc(State(hits): State<Hits>, body: Bytes) -> Response {
+            hits.0.fetch_add(1, Ordering::SeqCst);
+            let id = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|value| value.get("id").cloned())
+                .unwrap_or(Value::Null);
+            Json(json!({"jsonrpc":"2.0","id":id,"result":"0x10"})).into_response()
+        }
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/", post(ok_rpc))
+            .with_state(Hits(Arc::clone(&hits)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fallback");
+        let address = listener.local_addr().expect("fallback address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fallback");
+        });
+
+        let mut config = v2_test_config();
+        config.chain_overrides.push(ChainOverride {
+            chain_id: 127,
+            fallback_url: Some(format!("http://{address}/")),
+            ..ChainOverride::default()
+        });
+        let catalog = Catalog {
+            chains: vec![CatalogChain {
+                chain_id: 127,
+                name: "Empty".to_owned(),
+                short_name: None,
+                chain: None,
+                slug: None,
+                is_testnet: false,
+                native_symbol: None,
+                explorer_url: None,
+                status: None,
+                tvl: None,
+                endpoints: vec![],
+            }],
+            by_id: std::collections::HashMap::from([(127, 0)]),
+        };
+        let registry = Arc::new(Registry::new(&config));
+        registry.set_catalog(Arc::new(catalog)).await;
+        let forwarder =
+            Arc::new(Forwarder::new(Arc::clone(&registry), &config).expect("forwarder"));
+        let app = router(AppState::new(
+            registry,
+            forwarder,
+            config.server.batch_limit,
+        ));
+        let (status, body) = post_json_status(
+            app,
+            "/rpc/127",
+            json!({"jsonrpc":"2.0","id":7,"method":"eth_blockNumber","params":[]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"], "0x10");
+        assert_eq!(body["id"], 7);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

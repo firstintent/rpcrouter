@@ -610,3 +610,43 @@ head_tolerance_blocks = 64
   持久化的 `chains:auto` 不受影响。
 - 公共 overview 同时保留 `chains.serving` 与新增的 `chains.available`（同义），避免破坏既有调用方。
 
+## 16. 归档探测与付费兜底（2026-09-22）
+
+需求见 `docs/proposals/2026-09-22-archive-probe-quicknode-fallback/`。两件事都挂在现有探针和转发路径上，不改公共池的 P2C 打分。
+
+### 16.1 归档探测
+
+存活探针（`eth_chainId` + `eth_blockNumber`）通过之后，若距上次归档探测已超过 `probe.archive_interval_seconds`（默认 600），并且链头 ≥ `probe.archive_min_head`（默认 100000），按下面的顺序探测。链头更低时不发这些读取，结论保持 `unknown`。
+
+1. `eth_getBalance("0x0000…0000", "0x1")`。结果是十六进制数量表示创世状态还在；裁剪类错误表示不在。超时、429、5xx 不下结论。
+2. 解析内部交易。先在头块往前 32 块、再在头块往前 10 万块各取一块（空块最多再往前看 3 块），从中选一笔带 calldata 的真实交易，调用 `debug_traceTransaction`，tracer 用 `callTracer`。根调用是交易本身，`calls` 里嵌套的调用算内部交易；也认 `traceAddress` 非空的扁平 trace。
+   - 近处能解析出调用树、远处也能 → `archive=yes`。内部交易条数可以是 0，只要树本身能解析。
+   - 近处能解析、远处报历史状态被裁剪 → `archive=no`。这是默认全节点：近期能查，再往前不能查。这条覆盖余额结果。
+   - 方法不存在（没开 debug 命名空间）→ 不参与结论，退回第 1 步的余额。
+   - 近处就失败，或远处超时 → 不下结论，同样退回余额。
+
+时延记决定性的那一次历史读取：内部交易解析分出了近/远，就记远处那次 `debug_traceTransaction`；否则记余额那次。超时和 429 不更新时延。
+
+这次读取**不**调用 `record_failure` / `record_success`。不是归档节点仍然是健康的公共节点。路由用的 `latencyEwmaMs` 仍只来自存活探针和真实流量，避免历史状态的慢响应把节点从普通请求里排掉。
+
+归档结论放在端点内存里，不进 Redis 健康快照。进程重启后下一轮存活探针会重新判断。
+
+### 16.2 付费兜底
+
+`chain_overrides.fallback_url` 或环境变量 `RPCROUTER_FALLBACK_<chainId>` / `RPCROUTER_FALLBACKS` 给个别链配一个 QuickNode（或其他付费）URL。同一链环境变量覆盖 TOML。
+
+- 该 URL **不**进入公共候选池，不参与 P2C，不作为 hedge 目标，也不计入「公开端点数」。
+- 转发先走原来的公共池。公共池没有成功响应后，在总 deadline 内再试兜底**一次**。
+- 配了兜底时，公共池的尝试截止时间提前 `min(request_timeout, deadline/2)`，把最后一段时间留给兜底。
+- 兜底成功则正常返回，不记用户可见错误。公共池当时是 Active 且兜底也失败，才记用户可见错误。
+- 兜底端点走同一套冷却状态机：429 和连续失败会冷却，冷却期间跳过兜底。
+- 没有公开端点但配了兜底的链不再直接 503，请求会打到兜底。`discovery.deny` 和 disabled 仍然拒绝，兜底不能绕过。
+- 日志、Prometheus 的 `endpoint` 标签、管理接口和审计只保留 `scheme://host/<redacted>`。公共主页不返回兜底信息。
+- 指标只有 `rpcrouter_fallback_attempts_total{chain_id}` 和 `rpcrouter_fallback_successes_total{chain_id}`。
+
+限额沿用 `endpoint_overrides`：把兜底 URL 再写进 `endpoint_overrides` 就能单独设 rps / concurrency，否则用 `upstream` 的默认值。
+
+### 16.3 展示
+
+`GET /admin/api/chains/{id}` 的每个 `endpointRows` 增加 `archive` 和 `archiveLatencyEwmaMs`。详情额外有 `fallback`（脱敏 URL、状态、两类时延）。链列表和 `/api/public/*` 不带 `fallback`。Dashboard 链详情增加这两列和一张 Paid fallback 卡片。
+

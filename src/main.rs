@@ -145,7 +145,9 @@ async fn main() -> Result<()> {
         Arc::clone(&metrics),
         Arc::clone(&state_runtime),
     );
-    let probes = Arc::new(ProbeManager::new(Arc::clone(&registry), &config)?);
+    let probes = Arc::new(
+        ProbeManager::new(Arc::clone(&registry), &config)?.with_metrics(Arc::clone(&metrics)),
+    );
     spawn_probes(Arc::clone(&probes), Arc::clone(&metrics));
     // 自动开启：恢复持久化集合并预热，然后起后台评估任务（关闭时两者都不做）。
     let auto_enable = if config.discovery.auto_enable.enabled {

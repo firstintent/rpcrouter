@@ -40,11 +40,8 @@ fn phase2_config() -> Config {
             default_concurrency: 64,
         },
         probe: ProbeConfig {
-            min_interval_seconds: 15,
-            max_interval_seconds: 30,
-            max_concurrency: 32,
             request_timeout_ms: 500,
-            max_block_lag: 5,
+            ..ProbeConfig::default()
         },
         ..Config::default()
     }

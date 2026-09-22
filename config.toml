@@ -60,6 +60,12 @@ max_interval_seconds = 30
 max_concurrency = 32
 request_timeout_ms = 5000
 max_block_lag = 5
+# 链头不低于 archive_min_head 时做归档探测：区块 1 的 eth_getBalance，
+# 再加上近 32 块和大约 10 万块之前的内部交易解析（debug_traceTransaction）。
+# 没开 debug 时只采用余额结论。非归档不摘除端点。默认 10 分钟一轮。
+archive_enabled = true
+archive_interval_seconds = 600
+archive_min_head = 100000
 
 [cache]
 max_bytes = 536870912
@@ -119,6 +125,11 @@ confirmation_depth = 128
 tip_ttl_ms = 2000
 extra_endpoints = []
 disabled_endpoints = []
+# 付费兜底（QuickNode 等）。只在公共池耗尽后尝试一次，不参与负载均衡和 hedge。
+# URL 含密钥时不要写进仓库，用环境变量：
+#   RPCROUTER_FALLBACK_137=https://example.quiknode.pro/<token>/
+#   RPCROUTER_FALLBACKS=137=https://example.quiknode.pro/<token>/,1=https://...
+# fallback_url = "https://example.quiknode.pro/<token>/"
 
 [[chain_overrides]]
 chain_id = 42161
