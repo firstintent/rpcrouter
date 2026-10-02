@@ -841,6 +841,14 @@ impl Registry {
         for id in chain_ids {
             self.auto_pinned.insert(id, true);
         }
+        // 启动时 hot 快照恢复早于本函数，已 materialize 的链要按新集合同步 pinned 标记，
+        // 否则自动开启链会以 hot 身份留存并被 idle 降级。
+        for entry in self.chains.iter() {
+            entry
+                .value()
+                .pinned
+                .store(self.is_pinned_chain(*entry.key()), Ordering::Relaxed);
+        }
     }
 
     pub async fn apply_override(&self, chain_id: u64, value: ChainOverrideState) {
@@ -2914,6 +2922,57 @@ mod tests {
         assert_eq!(counts.pinned, 1);
         assert_eq!(counts.dormant, 0);
         assert_eq!(registry.all_endpoints(1).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn restored_auto_chain_already_hot_becomes_pinned() {
+        // 启动顺序：hot 快照恢复先 materialize 了链，之后才恢复自动开启集合。
+        let config = Config {
+            chains: vec![],
+            discovery: crate::config::DiscoveryConfig {
+                enabled: true,
+                idle_seconds: 1,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let registry = Registry::new(&config);
+        let catalog = Catalog {
+            chains: vec![CatalogChain {
+                chain_id: 999,
+                name: "Auto".to_owned(),
+                short_name: None,
+                chain: None,
+                slug: None,
+                is_testnet: false,
+                native_symbol: None,
+                explorer_url: None,
+                status: None,
+                tvl: None,
+                endpoints: vec![crate::chainlist::CatalogEndpoint {
+                    url: "https://rpc.auto.example".to_owned(),
+                    tracking: None,
+                }],
+            }],
+            by_id: HashMap::from([(999, 0)]),
+        };
+        registry.set_catalog(Arc::new(catalog)).await;
+
+        let _ = registry.resolve_for_request(999).await.expect("chain 999");
+        assert_eq!(registry.chain_counts().await.hot, 1);
+
+        registry.restore_auto_pinned([999]);
+        let counts = registry.chain_counts().await;
+        assert_eq!(counts.pinned, 1);
+        assert_eq!(counts.hot, 0);
+
+        let last_ingress = registry
+            .chain(999)
+            .expect("chain state")
+            .last_ingress
+            .load(Ordering::Relaxed);
+        registry.housekeeping_at(last_ingress + 2).await;
+        assert_eq!(registry.chain_counts().await.pinned, 1);
     }
 
     #[tokio::test]
