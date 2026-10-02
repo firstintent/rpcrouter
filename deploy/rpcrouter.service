@@ -38,7 +38,7 @@ TimeoutStopSec=20
 Environment=RPCROUTER_CONFIG=/etc/rpcrouter/config.toml
 Environment=RPCROUTER_CHAINLIST_CACHE_PATH=/etc/rpcrouter/data/rpcs.json
 # 例：如需通过环境变量调整启用链，可追加：
-# Environment=RPCROUTER_CHAINS=1,143,56,137,42161,8453,10,43114
+# Environment=RPCROUTER_CHAINS=1,143,56,137,42161,8453,10,43114,11155111
 ExecStart=/usr/local/bin/rpcrouter
 
 [Install]

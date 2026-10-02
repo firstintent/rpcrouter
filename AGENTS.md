@@ -98,3 +98,5 @@ v1 已交付（2026-07-26 验收）。后续任务规划统一沉淀在 `docs/RO
       判定与观察不依赖 Prometheus；需求 `docs/proposals/2026-09-12-auto-enable-chains/`、
       方案 DESIGN-v2 §15、任务 TASKS-v2 W9；压测见 docs/reports/loadtest-w9.md
       （9,999.78 QPS、p99 1.036ms、UVE 0）。
+- [x] Sepolia（11155111）加入默认 pinned 链（2026-10-02，纯配置变更，源码样例与 mydevops
+      生产配置同步；需求 `docs/proposals/2026-10-02-sepolia-pinned/`）。

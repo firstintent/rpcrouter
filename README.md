@@ -6,7 +6,7 @@ rpcrouter 是面向 EVM 链的 JSON-RPC 路由网关。它从 Chainlist 汇集�
 所有端点同时不可用时，网关才返回 `-32000`。
 
 仓库随附的 `config.toml` 启用 Ethereum、Monad、BSC、Polygon、Arbitrum One、Base、
-OP Mainnet 和 Avalanche C-Chain。项目仅代理 HTTP JSON-RPC，不提供 WebSocket、鉴权或计费。
+OP Mainnet、Avalanche C-Chain 和 Ethereum Sepolia 测试网。项目仅代理 HTTP JSON-RPC，不提供 WebSocket、鉴权或计费。
 
 ## 工作原理
 
@@ -71,7 +71,7 @@ curl -sS http://127.0.0.1:8545/rpc/1 \
 公共池还有可用端点时不会打到这个 URL；公共池耗尽后只再试一次。指标和后台展示会隐去 URL 路径。
 
 仓库配置使用偏保守的缓存确认深度。BSC 按 Maxwell 升级后的约 750ms 出块配置；Polygon
-约 2s、Arbitrum 约 250ms，Base、OP 与 Avalanche 约 2s。tip TTL 不超过对应块时间和 2s。
+约 2s、Arbitrum 约 250ms，Base、OP 与 Avalanche 约 2s，Sepolia 与以太坊主网同为 12s。tip TTL 不超过对应块时间和 2s。
 附加公开端点前应先确认其服务条款，并通过 `endpoint_overrides` 下调供应商声明的额度。
 
 ## HTTP 接口
