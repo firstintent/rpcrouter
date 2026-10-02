@@ -100,3 +100,5 @@ v1 已交付（2026-07-26 验收）。后续任务规划统一沉淀在 `docs/RO
       （9,999.78 QPS、p99 1.036ms、UVE 0）。
 - [x] Sepolia（11155111）加入默认 pinned 链（2026-10-02，纯配置变更，源码样例与 mydevops
       生产配置同步；需求 `docs/proposals/2026-10-02-sepolia-pinned/`）。
+- [x] 浏览器跨域放开（2026-10-02 上线）：入口 Caddy 对 `/rpc/*`、`/api/public/*` 回 `*` 与 204 预检，
+      `/admin` 不开；需求 `docs/proposals/2026-10-02-browser-cors/`。

@@ -31,7 +31,8 @@
 
 | 日期 | 提案 | 状态 | 关联 |
 |---|---|---|---|
-| 2026-10-02 | [Sepolia 加入默认常驻链](2026-10-02-sepolia-pinned/) | 已交付（待部署） | 纯配置变更，无 DESIGN/TASKS |
+| 2026-10-02 | [浏览器跨域调用（CORS）放开](2026-10-02-browser-cors/) | 已上线 | 入口 Caddy 配置，无 DESIGN/TASKS |
+| 2026-10-02 | [Sepolia 加入默认常驻链](2026-10-02-sepolia-pinned/) | 已上线 | 纯配置变更，无 DESIGN/TASKS |
 | 2026-09-22 | [归档探测与付费兜底](2026-09-22-archive-probe-quicknode-fallback/) | 已实现 | DESIGN-v2 §16 |
 | 2026-09-12 | [自动开启优质 EVM 链](2026-09-12-auto-enable-chains/) | 已交付 | DESIGN-v2 §15 / TASKS-v2 W9 |
 | 2026-08-26 | [公共只读主页](2026-08-26-public-site/) | 已交付 | DESIGN-v2 §14 / TASKS-v2 W8 |

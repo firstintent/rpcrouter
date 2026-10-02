@@ -185,6 +185,7 @@ scripts/soak.sh --url http://127.0.0.1:8545 --duration 86400 --qps 3 \
 | 延迟 p99 上涨 | 查 `rpcrouter_failover_depth`（失败重试是否变多）、`rpcrouter_hedge_ratio`（hedge 占比）、上游端点 slow/5xx 是否变多。 |
 | 上游 429 率突增 | 是否触达端点 rps 上限（`default_rps` 或 `endpoint_overrides`）；用 `rpcrouter_endpoint_rate_limited_total` 按 endpoint 定位是哪个端点。 |
 | `/metrics` 抓取失败/401 | compose 默认未鉴权；若生产启用了 `server.metrics_auth_token`，需在 `prometheus.yml` 的 scrape 加 `authorization` 头（见文件内注释）。 |
+| 浏览器跨域调用被拦（CORS） | 跨域在入口 Caddy 处理（mydevops `gateway/sites/rpcrouter.caddy`）：`/rpc/*` 与 `/api/public/*` 回 `Access-Control-Allow-Origin: *`，`OPTIONS` 预检由 Caddy 回 204，`/admin` 不开。网关本身对 `OPTIONS` 回 405，绕过 Caddy 直连 8545 的部署需另行处理。自查：`curl -i -X OPTIONS https://rpc.cryptostack.ai/rpc/1 -H "Origin: https://x.example" -H "Access-Control-Request-Method: POST"` 应为 204。 |
 | soak 无 RSS 数据 | `--pid` 未生效或 `/proc/<pid>/status` 不可读（跨容器 PID 命名空间差异）；确认用宿主机侧 PID。 |
 
 ## 9. 状态存储

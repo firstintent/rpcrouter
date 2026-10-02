@@ -133,3 +133,8 @@ print(f'\nendpoints={len(eps)} ok={len(ok)} '
 生效后验收：`/api/public/chains/11155111` 的 `state` 为 `available`、`active` ≥ 2
 （后台链详情显示 pinned），
 `eth_chainId` 经网关返回 `0xaa36a7`。
+
+## 变更记录
+
+- 2026-10-02：用户授权后 `docker compose restart rpcrouter` 上线（只重启、不重建镜像），
+  `rpcrouter_chain_pinned{chain_id="11155111"} = 1`，可用端点 11/29。
